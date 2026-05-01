@@ -58,7 +58,6 @@ def section(title):
     st.markdown(f"### {title}")
     st.markdown("---")
 
-
 for k, v in {
     "menu_df": None,
     "freeze_idx": 0,
@@ -130,7 +129,6 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
     st.session_state.freeze_idx = freeze_idx_new
     st.session_state.original_name = os.path.splitext(menu_file.name)[0]
     st.session_state.last_file_name = menu_file.name
-
     snap_df = raw.copy()
     snap_df["Price"] = pd.to_numeric(snap_df["Price"], errors="coerce")
     snap_df["Markup Price"] = pd.to_numeric(snap_df["Markup Price"], errors="coerce")
@@ -365,12 +363,29 @@ if operation == "Apply flat % discount":
 
 elif operation == "Use reference CSV":
 
-    ref_mode = st.radio(
-        "What to do with the reference CSV?",
-        ["Slash Prices", "Update Prices Directly"],
-        key="ref_mode_radio",
-        horizontal=True,
-    )
+    col_mode, col_template = st.columns([3, 1])
+
+    with col_mode:
+        ref_mode = st.radio(
+            "What to do with the reference CSV?",
+            ["Slash Prices", "Update Prices Directly"],
+            key="ref_mode_radio",
+            horizontal=True,
+        )
+
+    with col_template:
+        template_csv = (
+            "Category,Subcategory,Item Name,Variant,Base Price,Revised Price,Add on (y/n)\n"
+            "Woodfired Pastas,Woodfired - Grilled Chicken Pasta,Woodfired - Grilled Chicken White Sauce Pasta with Truffle Oil,Penne,795,590,n\n"
+        )
+        st.download_button(
+            "⬇ Download Template",
+            data=template_csv.encode("utf-8"),
+            file_name="SLASH-TEMPLATE.csv",
+            mime="text/csv",
+            key="template_dl",
+        )
+
     mode = "slash" if ref_mode == "Slash Prices" else "replace"
     st.markdown(" ")
 
@@ -604,7 +619,6 @@ elif operation == "Use reference CSV":
                     )
                     st.session_state.menu_df = updated_df.copy()
                     st.session_state.audit_log = detail_df
-                    # store full working menu for persistent preview
                     st.session_state[f"_preview_df_post-ref-update preview"] = updated_df.iloc[freeze_idx:].copy()
                     st.session_state.ref_apply_done = True
                     st.session_state.ref_apply_count = len(confirmed_mapped)
