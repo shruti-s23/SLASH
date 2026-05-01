@@ -9,7 +9,7 @@ sys.path.append(current_dir)
 
 from decision_engine import match_items, process_matches, find_addon_rows, strip_ids
 
-st.set_page_config(page_title="Price Revision Tool", layout="wide")
+st.set_page_config(page_title="Price Revision", layout="wide")
 
 REQUIRED_COLUMNS = {"Price", "Category", "Brand SKU ID Type", "Item"}
 
