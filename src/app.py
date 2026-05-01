@@ -19,8 +19,6 @@ METADATA_KEYWORDS = [
 ]
 
 
-# ─── helpers ──────────────────────────────────────────────────────────────────
-
 def detect_freeze_index(df):
     for i in df.index:
         try:
@@ -61,8 +59,6 @@ def section(title):
     st.markdown("---")
 
 
-# ─── session state ────────────────────────────────────────────────────────────
-
 for k, v in {
     "menu_df": None,
     "freeze_idx": 0,
@@ -89,8 +85,6 @@ for k, v in {
         st.session_state[k] = v
 
 
-# ─── upload ───────────────────────────────────────────────────────────────────
-
 st.title("Price Revision Tool")
 st.markdown(" ")
 
@@ -98,7 +92,6 @@ section("① Upload Menu CSV")
 
 menu_file = st.file_uploader("Upload MENU CSV", type=["csv"], key="menu_uploader")
 
-# full reset when file is removed
 if menu_file is None and st.session_state.last_file_name is not None:
     for k in list(st.session_state.keys()):
         if k not in ("menu_uploader",):
@@ -138,7 +131,6 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
     st.session_state.original_name = os.path.splitext(menu_file.name)[0]
     st.session_state.last_file_name = menu_file.name
 
-    # ── build frozen slashing snapshot immediately on upload ──
     snap_df = raw.copy()
     snap_df["Price"] = pd.to_numeric(snap_df["Price"], errors="coerce")
     snap_df["Markup Price"] = pd.to_numeric(snap_df["Markup Price"], errors="coerce")
@@ -183,8 +175,6 @@ c3.metric("Row Types", " · ".join(available_types) if available_types else "N/A
 show_preview(df, "Menu CSV")
 st.markdown(" ")
 
-
-# ─── slashing detection (FROZEN — reads snapshot, never re-evaluates) ─────────
 
 section("② Slashing Detection")
 
@@ -231,7 +221,6 @@ else:
                 df_rm.loc[idx_rm, "Update Required ?"] = "Yes"
                 st.session_state.menu_df = df_rm.copy()
                 st.session_state.slash_removal_done = True
-                # store preview before rerun so _render_preview can show it
                 st.session_state[f"_preview_df_post-slash-removal preview"] = df_rm.iloc[freeze_idx:].copy()
                 st.rerun()
     else:
@@ -240,8 +229,6 @@ else:
 
 st.markdown(" ")
 
-
-# ─── operation select ─────────────────────────────────────────────────────────
 
 section("③ Operation")
 
@@ -256,8 +243,6 @@ operation = st.selectbox(
 )
 st.markdown(" ")
 
-
-# ─── OPERATION: FLAT DISCOUNT ─────────────────────────────────────────────────
 
 if operation == "Apply flat % discount":
 
@@ -293,7 +278,6 @@ if operation == "Apply flat % discount":
         ws["Price"] = pd.to_numeric(ws["Price"], errors="coerce")
         ws = ws.iloc[freeze_idx:]
 
-        # ── CATEGORY multiselect ──
         all_cats_raw = sorted(ws["Category"].dropna().unique().tolist())
         all_cats_display = [clean_label(c) for c in all_cats_raw]
         cat_map = dict(zip(all_cats_display, all_cats_raw))
@@ -305,7 +289,6 @@ if operation == "Apply flat % discount":
         )
         sel_cats_raw = [cat_map[c] for c in sel_cats_display] if sel_cats_display else all_cats_raw
 
-        # ── SUBCATEGORY multiselect — scoped to chosen categories ──
         sel_subcats_raw = []
         sel_items_raw = []
 
@@ -324,7 +307,6 @@ if operation == "Apply flat % discount":
             )
             sel_subcats_raw = [sub_map[s] for s in sel_subs_display] if sel_subs_display else subcats_in_scope
 
-            # ── ITEM multiselect — scoped to chosen subcategories ──
             items_in_scope = sorted(
                 ws[
                     ws["Category"].isin(sel_cats_raw)
@@ -381,8 +363,6 @@ if operation == "Apply flat % discount":
         _render_preview("post-discount preview")
 
 
-# ─── OPERATION: REFERENCE CSV ─────────────────────────────────────────────────
-
 elif operation == "Use reference CSV":
 
     ref_mode = st.radio(
@@ -407,7 +387,6 @@ elif operation == "Use reference CSV":
         st.session_state.pop("_preview_df_post-ref-update preview", None)
         st.session_state.pop("_preview_expanded_post-ref-update preview", None)
 
-    # if user switched between Slash / Update modes — wipe everything and remount uploader
     if st.session_state.last_ref_mode != mode:
         if st.session_state.last_ref_mode is not None:
             _reset_ref_state()
@@ -566,7 +545,6 @@ elif operation == "Use reference CSV":
 
                 st.markdown(" ")
 
-                # ── addon propagation check ──
                 menu_full = st.session_state.menu_df.copy()
                 addon_col_exists = any(c.strip().lower() == "addon" for c in menu_full.columns)
 
@@ -637,8 +615,6 @@ elif operation == "Use reference CSV":
                 _render_preview("post-ref-update preview")
 
 
-# ─── OPERATION: REMOVE SLASHING ONLY ─────────────────────────────────────────
-
 elif operation == "Remove existing slashing only":
 
     df_r = st.session_state.menu_df.copy()
@@ -675,8 +651,6 @@ elif operation == "Remove existing slashing only":
     if st.session_state.get("remove_slash_only_done"):
         st.success(f"✓ Slashing removed.")
         _render_preview("post-removal preview")
-
-# ─── download ─────────────────────────────────────────────────────────────────
 
 st.markdown(" ")
 section("④ Download Output")
