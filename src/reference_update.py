@@ -11,27 +11,16 @@ from decision_engine import match_items, process_matches
 st.set_page_config(page_title="Price Revision Tool", layout="wide")
 st.title("Price Revision Tool")
 
-# -------------------------
-# SESSION STATE
-# -------------------------
 if "menu_df" not in st.session_state:
     st.session_state.menu_df = None
 
 if "freeze_idx" not in st.session_state:
     st.session_state.freeze_idx = 0
 
-
-# -------------------------
-# RESET WHEN FILE REMOVED
-# -------------------------
 def reset_state():
     st.session_state.menu_df = None
     st.session_state.freeze_idx = 0
 
-
-# -------------------------
-# METADATA DETECTION
-# -------------------------
 def detect_freeze_index(df):
     keywords = [
         "brandskuid",
@@ -55,10 +44,6 @@ def detect_freeze_index(df):
 
     return 0
 
-
-# -------------------------
-# UPLOAD
-# -------------------------
 st.header("Upload Menu CSV")
 
 menu_file = st.file_uploader(
@@ -86,7 +71,6 @@ if menu_file:
     st.subheader("Menu Preview")
     st.dataframe(df.head())
 
-    # ITEM COUNT (WORKING AREA ONLY)
     if 'Item' in df.columns and 'Brand SKU ID Type' in df.columns:
         working_df = df.iloc[freeze_idx:]
         item_count = working_df[working_df['Brand SKU ID Type'] == 'Item']['Item'].nunique()
@@ -96,19 +80,12 @@ if menu_file:
     st.info(f"Rows: {df.shape[0]} | Items: {item_count}")
     st.info(f"Freeze till row: {freeze_idx}")
 
-
-# -------------------------
-# MAIN FLOW
-# -------------------------
 if st.session_state.menu_df is not None:
 
     df = st.session_state.menu_df.copy()
     freeze_idx = st.session_state.freeze_idx
     working_df = df.iloc[freeze_idx:]
 
-    # -------------------------
-    # SLASHING DETECTION
-    # -------------------------
     st.header("Slashing Detection")
 
     df['Price'] = pd.to_numeric(df['Price'], errors='coerce')
@@ -145,10 +122,6 @@ if st.session_state.menu_df is not None:
         st.success("No slashing detected")
 
     st.session_state.menu_df = df
-
-    # -------------------------
-    # OPERATION
-    # -------------------------
     st.header("Select Operation")
 
     operation = st.selectbox(
@@ -161,9 +134,6 @@ if st.session_state.menu_df is not None:
         ]
     )
 
-    # -------------------------
-    # SCOPE (ONLY WORKING AREA)
-    # -------------------------
     if 'Brand SKU ID Type' in df.columns:
         available_types = sorted(working_df['Brand SKU ID Type'].dropna().unique())
     else:
@@ -175,9 +145,6 @@ if st.session_state.menu_df is not None:
         default=available_types
     )
 
-    # -------------------------
-    # FLAT DISCOUNT
-    # -------------------------
     if operation == "Apply flat % discount":
 
         discount = st.number_input("Discount %", 1.0, 99.0, 20.0)
@@ -198,9 +165,6 @@ if st.session_state.menu_df is not None:
             st.session_state.menu_df = df
             st.success(f"Discount applied on {mask.sum()} rows")
 
-    # -------------------------
-    # REFERENCE CSV FLOW
-    # -------------------------
     elif operation == "Use reference CSV":
 
         ref_file = st.file_uploader("Upload Reference CSV", type=["csv"])
@@ -228,9 +192,6 @@ if st.session_state.menu_df is not None:
 
                     st.success(f"Matched {len(matches)} items")
 
-    # -------------------------
-    # DIRECT REPLACE
-    # -------------------------
     elif operation == "Replace prices directly":
 
         ref_file = st.file_uploader("Upload Reference CSV", type=["csv"])
@@ -267,9 +228,6 @@ if st.session_state.menu_df is not None:
 
                 st.success(f"Updated {updated} rows")
 
-    # -------------------------
-    # DOWNLOAD
-    # -------------------------
     st.header("Download Output")
 
     final_df = st.session_state.menu_df
