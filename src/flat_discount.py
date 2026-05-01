@@ -9,19 +9,13 @@ def apply_flat_discount(menu_df):
         if col not in menu_df.columns:
             raise Exception(f"Missing required column: {col}")
 
-    # -------------------------
-    # SAFE NUMERIC CONVERSION
-    # -------------------------
     menu_df['Price'] = pd.to_numeric(menu_df['Price'], errors='coerce').astype(float)
     menu_df['Markup Price'] = pd.to_numeric(menu_df['Markup Price'], errors='coerce').astype(float)
 
     menu_df['Category'] = menu_df['Category'].astype(str).str.strip()
 
-    working_idx = menu_df.index[2:]  # skip first 2 rows
+    working_idx = menu_df.index[2:]
 
-    # -------------------------
-    # INPUT: DISCOUNT
-    # -------------------------
     while True:
         try:
             discount = float(input("Enter discount % (e.g., 20 for 20%): "))
@@ -33,9 +27,6 @@ def apply_flat_discount(menu_df):
 
     discount_factor = (100 - discount) / 100
 
-    # -------------------------
-    # INPUT: SCOPE
-    # -------------------------
     print("\nSelect scope:")
     print("1. Items only")
     print("2. Items + Variants")
@@ -54,9 +45,6 @@ def apply_flat_discount(menu_df):
             break
         print("Invalid input.\n")
 
-    # -------------------------
-    # INPUT: CATEGORY
-    # -------------------------
     categories = sorted(menu_df['Category'].dropna().unique())
 
     print("\nAvailable Categories:")
@@ -78,9 +66,6 @@ def apply_flat_discount(menu_df):
         except:
             print("Invalid selection.\n")
 
-    # -------------------------
-    # APPLY DISCOUNT
-    # -------------------------
     print("\nApplying discount...\n")
 
     mask = (
@@ -90,24 +75,17 @@ def apply_flat_discount(menu_df):
         menu_df.index.isin(working_idx)
     )
 
-    # store old markup for comparison
     old_markup = menu_df['Markup Price'].copy()
 
-    # Move original → Markup ONLY if missing
     markup_missing = mask & menu_df['Markup Price'].isna()
     menu_df.loc[markup_missing, 'Markup Price'] = menu_df.loc[markup_missing, 'Price']
 
-    # Apply discount + ROUND to nearest integer
     menu_df.loc[mask, 'Price'] = (
         menu_df.loc[mask, 'Price'].astype(float) * discount_factor
     ).round(0)
 
-    # Mark update
     menu_df.loc[mask, 'Update Required ?'] = 'Yes'
 
-    # -------------------------
-    # NEW RULE: ONLY PRICE UPDATED → MARKUP = 0
-    # -------------------------
     only_price_changed = (
         (menu_df['Update Required ?'] == 'Yes') &
         (old_markup == menu_df['Markup Price'])
