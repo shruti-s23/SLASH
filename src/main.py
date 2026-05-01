@@ -13,16 +13,9 @@ def direct_replace(menu_df, ref_df):
 
     working_idx = menu_df.index[2:]
 
-    # -------------------------
-    # SAFE NUMERIC CONVERSION
-    # -------------------------
     menu_df['Price'] = pd.to_numeric(menu_df['Price'], errors='coerce').astype(float)
     menu_df['Markup Price'] = pd.to_numeric(menu_df['Markup Price'], errors='coerce').astype(float)
     ref_df['Revised Price'] = pd.to_numeric(ref_df['Revised Price'], errors='coerce').astype(float)
-
-    # -------------------------
-    # NORMALIZE
-    # -------------------------
     menu_df['Item_norm'] = menu_df['Item'].astype(str).str.strip().str.lower()
     ref_df['Item_norm'] = ref_df['Item'].astype(str).str.strip().str.lower()
 
@@ -33,9 +26,6 @@ def direct_replace(menu_df, ref_df):
         menu_df['Variant_norm'] = ""
         ref_df['Variant_norm'] = ""
 
-    # -------------------------
-    # MATCH KEY
-    # -------------------------
     menu_df['match_key'] = menu_df['Item_norm'] + "|" + menu_df['Variant_norm']
     ref_df['match_key'] = ref_df['Item_norm'] + "|" + ref_df['Variant_norm']
 
@@ -44,9 +34,6 @@ def direct_replace(menu_df, ref_df):
     preview = []
     flagged = []
 
-    # -------------------------
-    # BUILD PREVIEW
-    # -------------------------
     for i in working_idx:
 
         key = menu_df.at[i, 'match_key']
@@ -59,7 +46,6 @@ def direct_replace(menu_df, ref_df):
         current_price = menu_df.at[i, 'Price']
         item_name = menu_df.at[i, 'Item']
 
-        # constraint
         if pd.notna(markup_price) and revised_price > markup_price:
             flagged.append({
                 "Item": item_name,
@@ -86,17 +72,11 @@ def direct_replace(menu_df, ref_df):
         for f in flagged:
             print(f"{f['Item']} | Markup: {f['Markup']} | Revised: {f['Revised']}")
 
-    # -------------------------
-    # CONFIRM
-    # -------------------------
     choice = input("\nApply changes? (y/n): ").strip().lower()
     if choice != "y":
         print("Aborted.")
         return menu_df, 0
 
-    # -------------------------
-    # APPLY
-    # -------------------------
     updated_count = 0
 
     for row in preview:
@@ -108,13 +88,11 @@ def direct_replace(menu_df, ref_df):
         menu_df.at[idx, 'Price'] = round(row["New Price"])
         menu_df.at[idx, 'Update Required ?'] = 'Yes'
 
-        # NEW RULE
         if pd.isna(old_markup):
             menu_df.at[idx, 'Markup Price'] = 0
 
         updated_count += 1
 
-    # cleanup
     menu_df.drop(columns=['Item_norm', 'Variant_norm', 'match_key'], inplace=True, errors='ignore')
 
     return menu_df, updated_count
