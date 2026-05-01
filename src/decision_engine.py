@@ -118,7 +118,6 @@ def match_items(menu_df, ref_df):
     menu_df = menu_df.copy().reset_index(drop=True)
     ref_df = ref_df.copy().reset_index(drop=True)
 
-    # --- detect ref columns ---
     ref_item_col = next(
         (c for c in ref_df.columns if "item" in c.lower() and "group" not in c.lower() and "addon" not in c.lower()),
         None
@@ -134,7 +133,6 @@ def match_items(menu_df, ref_df):
         None
     )
 
-    # --- detect menu columns ---
     menu_item_col = next((c for c in menu_df.columns if c.strip().lower() == "item"), None)
     menu_addon_col = next((c for c in menu_df.columns if c.strip().lower() == "addon"), None)
     menu_cat_col = next((c for c in menu_df.columns if "category" in c.lower() and "sub" not in c.lower()), None)
@@ -152,7 +150,6 @@ def match_items(menu_df, ref_df):
     if menu_item_col is None:
         raise ValueError("Could not find Item column in menu CSV.")
 
-    # pre-build normalised item names for menu items and addons separately
     menu_items_norm = [normalize(str(v)) for v in menu_df[menu_item_col].tolist()]
     menu_addons_norm = (
         [normalize(str(v)) for v in menu_df[menu_addon_col].tolist()]
@@ -172,13 +169,11 @@ def match_items(menu_df, ref_df):
         ref_subcat = normalize(r_row[ref_subcat_col]) if ref_subcat_col else ""
         ref_variant = normalize(r_row[ref_variant_col]) if ref_variant_col else ""
 
-        # determine if this ref row is flagged as an addon
         is_addon_row = False
         if ref_addon_flag_col:
             flag_val = str(r_row[ref_addon_flag_col]).strip().lower()
             is_addon_row = flag_val in ("y", "yes", "1", "true")
 
-        # choose which column pool to search
         if is_addon_row and menu_addons_norm:
             search_pool = menu_addons_norm
             search_label = "addon"
@@ -334,7 +329,6 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
         elif mode == "replace":
             if pd.notna(ref_revised):
                 df.at[idx, "Price"] = ref_revised
-            # always clear Markup Price for direct replace — no slashing construct
             df.at[idx, "Markup Price"] = None
 
         df.at[idx, "Update Required ?"] = "Yes"
@@ -366,7 +360,6 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
             for addon_idx in addon_indices[menu_idx]:
                 apply_pricing(addon_idx, ref_base, ref_revised, "addon propagation", ref_item_name)
 
-    # ── build grouped audit: one entry per operation, items listed inside ──
     if not changed_rows:
         return df, pd.DataFrame()
 
@@ -376,10 +369,9 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
         "Items Affected": len(changed_rows),
         "Item List": ", ".join(items_affected),
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Detail": str(changed_rows),   # full detail preserved for rollback
+        "Detail": str(changed_rows),  
     }])
 
-    # also keep full detail rows for rollback under a separate key
     detail_df = pd.DataFrame(changed_rows)
 
     return df, audit_entry, detail_df
