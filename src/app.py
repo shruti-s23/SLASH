@@ -84,7 +84,7 @@ for k, v in {
         st.session_state[k] = v
 
 
-st.title("Price Revision Tool")
+st.title("Price Revision")
 st.markdown(" ")
 
 section("① Upload Menu CSV")
