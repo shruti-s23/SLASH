@@ -99,7 +99,8 @@ if menu_file is None and st.session_state.last_file_name is not None:
     st.rerun()
 
 if menu_file is not None and menu_file.name != st.session_state.last_file_name:
-    raw = pd.read_csv(menu_file, dtype=str)
+    raw = pd.read_csv(menu_file, dtype=str, engine="python")
+    raw = raw.astype(object)
     raw.columns = raw.columns.str.strip()
     raw = raw.apply(lambda col: col.map(lambda x: x.strip() if isinstance(x, str) else x))
 
@@ -341,8 +342,6 @@ if operation == "Apply flat % discount":
     st.markdown(" ")
     if st.button("Apply Discount", key="apply_flat_btn", type="primary"):
         df_apply = st.session_state.menu_df.copy()
-        df_apply["Price"] = pd.to_numeric(df_apply["Price"], errors="coerce")
-        df_apply["Markup Price"] = pd.to_numeric(df_apply["Markup Price"], errors="coerce")
         factor = (100 - discount) / 100
 
         update_col = next(
@@ -350,46 +349,50 @@ if operation == "Apply flat % discount":
             "Update Required ?"
         )
 
-        working_idx = df_apply.index[freeze_idx:]
-        mask = pd.Series(False, index=df_apply.index)
-        mask.loc[working_idx] = True
+        applied = 0
 
-        if scope_selected:
-            mask = mask & df_apply["Brand SKU ID Type"].isin(scope_selected)
-        if sel_cats_raw and len(sel_cats_raw) < len(
-            df_apply["Category"].dropna().unique()
-        ):
-            mask = mask & df_apply["Category"].isin(sel_cats_raw)
-        if sel_subcats_raw and len(sel_subcats_raw) < len(
-            df_apply["Subcategory"].dropna().unique()
-        ):
-            mask = mask & df_apply["Subcategory"].isin(sel_subcats_raw)
-        if sel_items_raw and len(sel_items_raw) < len(
-            df_apply["Item"].dropna().unique()
-        ):
-            mask = mask & df_apply["Item"].isin(sel_items_raw)
+        for idx in df_apply.index[freeze_idx:]:
 
-        if min_price > 0:
-            mask = mask & (df_apply["Price"] > min_price)
-
-        mask = mask & df_apply["Price"].notna()
-
-        for idx in df_apply[mask].index:
-            original_price = float(df_apply.at[idx, "Price"])
-            if pd.isna(original_price):
+            sku_type = str(df_apply.at[idx, "Brand SKU ID Type"]).strip()
+            if scope_selected and sku_type not in scope_selected:
                 continue
 
-            existing_markup = df_apply.at[idx, "Markup Price"]
-            if pd.isna(existing_markup) or existing_markup == 0:
-                df_apply.at[idx, "Markup Price"] = original_price
+            if sel_cats_raw:
+                if str(df_apply.at[idx, "Category"]).strip() not in sel_cats_raw:
+                    continue
 
-            df_apply.at[idx, "Price"] = round(original_price * factor)
+            if sel_subcats_raw:
+                if str(df_apply.at[idx, "Subcategory"]).strip() not in sel_subcats_raw:
+                    continue
+
+            if sel_items_raw:
+                if str(df_apply.at[idx, "Item"]).strip() not in sel_items_raw:
+                    continue
+
+            price_raw = str(df_apply.at[idx, "Price"]).strip()
+            if not price_raw or price_raw in ("", "nan", "None"):
+                continue
+
+            try:
+                price_val = float(price_raw)
+            except ValueError:
+                continue
+
+            if min_price > 0 and price_val <= min_price:
+                continue
+
+            discounted = round(price_val * factor)
+
+            df_apply.at[idx, "Markup Price"] = str(price_val)
+            df_apply.at[idx, "Price"] = str(discounted)
             df_apply.at[idx, update_col] = "Yes"
+
+            applied += 1
 
         st.session_state.menu_df = df_apply.copy()
         st.session_state.flat_discount_done = True
         show_preview(df_apply.iloc[freeze_idx:], "post-discount preview")
-        st.success(f"{discount}% discount applied to {int(mask.sum())} rows.")
+        st.success(f"{discount}% discount applied to {applied} rows.")
         st.rerun()
 
     if st.session_state.get("flat_discount_done"):
@@ -458,7 +461,8 @@ elif operation == "Use reference CSV":
 
     if ref_file is not None:
         if ref_file.name != st.session_state.last_ref_name:
-            ref_df_raw = pd.read_csv(ref_file, dtype=str)
+            ref_df_raw = pd.read_csv(ref_file, dtype=str, engine="python")
+            ref_df_raw = ref_df_raw.astype(object)
             ref_df_raw.columns = ref_df_raw.columns.str.strip()
             ref_df_raw = ref_df_raw.apply(lambda col: col.map(lambda x: x.strip() if isinstance(x, str) else x))
             ref_df_raw = ref_df_raw.reset_index(drop=True)
