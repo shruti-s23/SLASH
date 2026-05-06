@@ -9,7 +9,7 @@ sys.path.append(current_dir)
 
 from decision_engine import match_items, process_matches, find_addon_rows, strip_ids
 
-st.set_page_config(page_title="Price Revision Tool", layout="wide")
+st.set_page_config(page_title="Price Revision", layout="wide")
 
 REQUIRED_COLUMNS = {"Price", "Category", "Brand SKU ID Type", "Item"}
 
@@ -84,7 +84,7 @@ for k, v in {
 
                                                                                 
 
-st.title("Price Revision Tool")
+st.title("Price Revision")
 st.markdown(" ")
 
 section("① Upload Menu CSV")
@@ -218,6 +218,8 @@ else:
                     & w_rm["Markup Price"].notna()
                     & (w_rm["Markup Price"] > w_rm["Price"])
                 )
+                df_rm["Price"] = df_rm["Price"].astype(object)
+                df_rm["Markup Price"] = df_rm["Markup Price"].astype(object)
                 update_col_rm = next(
                     (c for c in df_rm.columns if c.strip().lower().startswith("update required")),
                     "Update Required ?"
@@ -342,6 +344,8 @@ if operation == "Apply flat % discount":
     st.markdown(" ")
     if st.button("Apply Discount", key="apply_flat_btn", type="primary"):
         df_apply = st.session_state.menu_df.copy()
+        df_apply["Price"] = df_apply["Price"].astype(object)
+        df_apply["Markup Price"] = df_apply["Markup Price"].astype(object)
         factor = (100 - discount) / 100
 
         update_col = next(
@@ -383,8 +387,8 @@ if operation == "Apply flat % discount":
 
             discounted = round(price_val * factor)
 
-            df_apply.at[idx, "Markup Price"] = str(price_val)
-            df_apply.at[idx, "Price"] = str(discounted)
+            df_apply.at[idx, "Markup Price"] = price_val
+            df_apply.at[idx, "Price"] = discounted
             df_apply.at[idx, update_col] = "Yes"
 
             applied += 1
@@ -702,6 +706,8 @@ elif operation == "Remove existing slashing only":
                     (c for c in df_r.columns if c.strip().lower().startswith("update required")),
                     "Update Required ?"
                 )
+                df_r["Price"] = df_r["Price"].astype(object)
+                df_r["Markup Price"] = df_r["Markup Price"].astype(object)
                 df_r.loc[idx_r, "Price"] = df_r.loc[idx_r, "Markup Price"]
                 df_r.loc[idx_r, "Markup Price"] = None
                 df_r.loc[idx_r, update_col_r] = "Yes"
