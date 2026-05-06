@@ -374,15 +374,16 @@ if operation == "Apply flat % discount":
 
         mask = mask & df_apply["Price"].notna()
 
-        for idx in df_apply.index[mask]:
-            original_price = df_apply.at[idx, "Price"]
-            existing_markup = df_apply.at[idx, "Markup Price"]
+        for idx in df_apply[mask].index:
+            original_price = float(df_apply.at[idx, "Price"])
+            if pd.isna(original_price):
+                continue
 
+            existing_markup = df_apply.at[idx, "Markup Price"]
             if pd.isna(existing_markup) or existing_markup == 0:
                 df_apply.at[idx, "Markup Price"] = original_price
 
-            discounted = round(original_price * factor)
-            df_apply.at[idx, "Price"] = discounted
+            df_apply.at[idx, "Price"] = round(original_price * factor)
             df_apply.at[idx, update_col] = "Yes"
 
         st.session_state.menu_df = df_apply.copy()
