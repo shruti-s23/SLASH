@@ -213,20 +213,24 @@ else:
                 df_rm = st.session_state.menu_df.copy()
                 df_rm["Price"] = pd.to_numeric(df_rm["Price"], errors="coerce")
                 df_rm["Markup Price"] = pd.to_numeric(df_rm["Markup Price"], errors="coerce")
-                w_rm = df_rm.iloc[freeze_idx:]
-                mask_rm = (
-                    w_rm["Price"].notna()
-                    & w_rm["Markup Price"].notna()
-                    & (w_rm["Markup Price"] > w_rm["Price"])
-                )
+
+                slashed_indices = [
+                    i for i in df_rm.index[freeze_idx:]
+                    if pd.notna(df_rm.at[i, "Price"])
+                    and pd.notna(df_rm.at[i, "Markup Price"])
+                    and df_rm.at[i, "Markup Price"] > df_rm.at[i, "Price"]
+                ]
+
                 df_rm["Price"] = df_rm["Price"].astype(object)
                 df_rm["Markup Price"] = df_rm["Markup Price"].astype(object)
+
                 update_col_rm = next(
                     (c for c in df_rm.columns if c.strip().lower().startswith("update required")),
                     "Update Required ?"
                 )
-                for i in w_rm[mask_rm].index:
-                    markup_val = w_rm.at[i, "Markup Price"] if not pd.isna(w_rm.at[i, "Markup Price"]) else df_rm.at[i, "Markup Price"]
+
+                for i in slashed_indices:
+                    markup_val = df_rm.at[i, "Markup Price"]
                     df_rm.at[i, "Price"] = markup_val
                     df_rm.at[i, "Markup Price"] = None
                     df_rm.at[i, update_col_rm] = "Yes"
@@ -662,23 +666,25 @@ elif operation == "Remove existing slashing only":
     df_r = st.session_state.menu_df.copy()
     df_r["Price"] = pd.to_numeric(df_r["Price"], errors="coerce")
     df_r["Markup Price"] = pd.to_numeric(df_r["Markup Price"], errors="coerce")
-    w_r = df_r.iloc[freeze_idx:]
-    mask_r = (
-        w_r["Price"].notna()
-        & w_r["Markup Price"].notna()
-        & (w_r["Markup Price"] > w_r["Price"])
-    )
+
+    slashed_r = [
+        i for i in df_r.index[freeze_idx:]
+        if pd.notna(df_r.at[i, "Price"])
+        and pd.notna(df_r.at[i, "Markup Price"])
+        and df_r.at[i, "Markup Price"] > df_r.at[i, "Price"]
+    ]
 
     if not st.session_state.get("remove_slash_only_done"):
-        if int(mask_r.sum()) == 0:
+        if not slashed_r:
             st.info("No slashing detected.")
         else:
             try:
-                s = w_r[mask_r].iloc[0]
-                pct = round((1 - s["Price"] / s["Markup Price"]) * 100, 2)
-                st.warning(f"Slashing active on {int(mask_r.sum())} rows (~{pct}% off).")
+                sp = df_r.at[slashed_r[0], "Price"]
+                sm = df_r.at[slashed_r[0], "Markup Price"]
+                pct = round((1 - sp / sm) * 100, 2)
+                st.warning(f"Slashing active on {len(slashed_r)} rows (~{pct}% off).")
             except Exception:
-                st.warning(f"Slashing active on {int(mask_r.sum())} rows.")
+                st.warning(f"Slashing active on {len(slashed_r)} rows.")
 
             if st.button("Remove All Slashing", key="remove_slash_only_btn", type="primary"):
                 df_r["Price"] = df_r["Price"].astype(object)
@@ -687,9 +693,9 @@ elif operation == "Remove existing slashing only":
                     (c for c in df_r.columns if c.strip().lower().startswith("update required")),
                     "Update Required ?"
                 )
-                for i in w_r[mask_r].index:
-                    m_val = w_r.at[i, "Markup Price"]
-                    df_r.at[i, "Price"] = m_val
+                for i in slashed_r:
+                    markup_val = df_r.at[i, "Markup Price"]
+                    df_r.at[i, "Price"] = markup_val
                     df_r.at[i, "Markup Price"] = None
                     df_r.at[i, update_col_r] = "Yes"
                 st.session_state.menu_df = df_r.copy()
