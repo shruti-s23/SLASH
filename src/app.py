@@ -63,7 +63,7 @@ def safe_write(df, idx, col, val):
     try:
         df.at[idx, col] = val
     except Exception:
-        df[col] = df[col].astype(object)
+        df[col] = df[col] 
         df.at[idx, col] = val
 
 
@@ -110,7 +110,10 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
     raw = pd.read_csv(menu_file, dtype=str)
     raw.columns = raw.columns.str.strip()
     raw = raw.apply(lambda col: col.map(lambda x: x.strip() if isinstance(x, str) else x))
-    raw = raw.astype(object)
+    raw = raw.copy()
+
+    if "ROW_ID" not in raw.columns:
+    raw.insert(0, "ROW_ID", range(1, len(raw) + 1))
 
     missing = REQUIRED_COLUMNS - set(raw.columns)
     if missing:
@@ -134,19 +137,35 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
         lambda x: "" if str(x).strip() == "Yes" else x
     )
 
-    def clean_price(val):
-        s = str(val).strip()
-        if s in ("", "nan", "None", "NaN", "none"):
-            return ""
-        try:
-            f = float(s)
-            return str(int(f)) if f == int(f) else str(round(f, 2))
-        except Exception:
-            return s
+    PRICE_COLUMNS = ["Price", "Markup Price"]
 
-    for pc in ["Price", "Markup Price"]:
-        if pc in raw.columns:
-            raw[pc] = raw[pc].apply(clean_price)
+
+def clean_numeric_price(val):
+    if pd.isna(val):
+        return pd.NA
+
+    s = str(val).strip()
+
+    if s.lower() in ("", "nan", "none"):
+        return pd.NA
+
+    s = (
+        s.replace("₹", "")
+        .replace(",", "")
+        .replace("INR", "")
+        .strip()
+    )
+
+    try:
+        return round(float(s), 2)
+    except Exception:
+        return pd.NA
+
+
+for col in PRICE_COLUMNS:
+    if col in raw.columns:
+        raw[col] = raw[col].apply(clean_numeric_price)
+        raw[col] = pd.to_numeric(raw[col], errors="coerce")
 
     for k in ["auto_matches", "hitl_queue", "confirmed_matches", "addon_indices"]:
         st.session_state[k] = [] if k != "addon_indices" else {}
@@ -250,24 +269,20 @@ else:
                     and df_rm.at[i, "Markup Price"] > df_rm.at[i, "Price"]
                 ]
 
-                df_rm["Price"] = df_rm["Price"].astype(object)
-                df_rm["Markup Price"] = df_rm["Markup Price"].astype(object)
+                df_rm["Price"] = df_rm["Price"] 
+                df_rm["Markup Price"] = df_rm["Markup Price"] 
 
                 update_col_rm = next(
                     (c for c in df_rm.columns if c.strip().lower().startswith("update required")),
                     "Update Required ?"
                 )
 
-                for i in slashed_indices:
-                    markup_val = df_rm.at[i, "Markup Price"]
-                    try:
-                        markup_float = float(markup_val)
-                        markup_str = str(int(markup_float)) if markup_float == int(markup_float) else str(markup_float)
-                    except Exception:
-                        markup_str = str(markup_val)
-                    df_rm.at[i, "Price"] = markup_str
-                    df_rm.at[i, "Markup Price"] = ""
-                    df_rm.at[i, update_col_rm] = "Yes"
+               for i in slashed_indices:
+                   markup_val = df_rm.at[i, "Markup Price"]
+                   if pd.notna(markup_val):
+                       df_rm.at[i, "Price"] = round(float(markup_val), 2)
+                       df_rm.at[i, "Markup Price"] = pd.NA
+                       df_rm.at[i, update_col_rm] = "Yes"
 
                 st.session_state.menu_df = df_rm.copy()
                 st.session_state.slash_removal_done = True
@@ -412,8 +427,15 @@ if operation == "Apply flat % discount":
                 skipped_min += 1
                 continue
 
-            df_apply.at[i, "Markup Price"] = str(int(price_val)) if price_val == int(price_val) else str(price_val)
-            df_apply.at[i, "Price"] = str(round(price_val * factor))
+
+            existing_markup = df_apply.at[i, "Markup Price"]
+            if pd.isna(existing_markup):
+                df_apply.at[i, "Markup Price"] = price_val
+                df_apply.at[i, update_col] = "Yes"
+
+            
+            new_price = round(price_val * factor, 2)
+            df_apply.at[i, "Price"] = new_price
             df_apply.at[i, update_col] = "Yes"
             applied += 1
 
@@ -663,8 +685,8 @@ elif operation == "Use reference CSV":
                     df_apply = st.session_state.menu_df.copy()
                     df_apply["Price"] = pd.to_numeric(df_apply["Price"], errors="coerce")
                     df_apply["Markup Price"] = pd.to_numeric(df_apply["Markup Price"], errors="coerce")
-                    df_apply["Price"] = df_apply["Price"].astype(object)
-                    df_apply["Markup Price"] = df_apply["Markup Price"].astype(object)
+                    df_apply["Price"] = df_apply["Price"] 
+                    df_apply["Markup Price"] = df_apply["Markup Price"] 
 
                     working_index_list = df_apply.iloc[freeze_idx:].index.tolist()
                     confirmed_mapped = []
@@ -725,8 +747,8 @@ elif operation == "Remove existing slashing only":
                 st.warning(f"Slashing active on {len(slashed_r)} rows.")
 
             if st.button("Remove All Slashing", key="remove_slash_only_btn", type="primary"):
-                df_r["Price"] = df_r["Price"].astype(object)
-                df_r["Markup Price"] = df_r["Markup Price"].astype(object)
+                df_r["Price"] = df_r["Price"] 
+                df_r["Markup Price"] = df_r["Markup Price"] 
                 update_col_r = next(
                     (c for c in df_r.columns if c.strip().lower().startswith("update required")),
                     "Update Required ?"
