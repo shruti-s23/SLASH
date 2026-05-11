@@ -134,6 +134,20 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
         lambda x: "" if str(x).strip() == "Yes" else x
     )
 
+    def clean_price(val):
+        s = str(val).strip()
+        if s in ("", "nan", "None", "NaN", "none"):
+            return ""
+        try:
+            f = float(s)
+            return str(int(f)) if f == int(f) else str(round(f, 2))
+        except Exception:
+            return s
+
+    for pc in ["Price", "Markup Price"]:
+        if pc in raw.columns:
+            raw[pc] = raw[pc].apply(clean_price)
+
     for k in ["auto_matches", "hitl_queue", "confirmed_matches", "addon_indices"]:
         st.session_state[k] = [] if k != "addon_indices" else {}
     st.session_state.hitl_cursor = 0
@@ -792,7 +806,21 @@ st.markdown(" ")
 section("⑤ Download Output")
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-final_df = st.session_state.menu_df
+
+def clean_price_for_export(val):
+    s = str(val).strip()
+    if s in ("", "nan", "None", "NaN", "none"):
+        return ""
+    try:
+        f = float(s)
+        return str(int(f)) if f == int(f) else str(round(f, 2))
+    except Exception:
+        return s
+
+final_df = st.session_state.menu_df.copy()
+for pc in ["Price", "Markup Price"]:
+    if pc in final_df.columns:
+        final_df[pc] = final_df[pc].apply(clean_price_for_export)
 
 col_d1, col_d2 = st.columns(2)
 
