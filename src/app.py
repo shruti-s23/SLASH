@@ -104,7 +104,7 @@ for k, v in {
         st.session_state[k] = v
 
 
-st.title("Price Revision Tool")
+st.title("Price Revision")
 st.markdown(" ")
 
 section("① Upload Menu CSV")
@@ -256,7 +256,7 @@ else:
                 for i in slashed_indices:
                     markup_val = df_rm.at[i, "Markup Price"]
                     df_rm.at[i, "Price"] = clean_price(markup_val)
-                    df_rm.at[i, "Markup Price"] = ""
+                    df_rm.at[i, "Markup Price"] = "0"
                     df_rm.at[i, update_col_rm] = "Yes"
 
                 for pc in ["Price", "Markup Price"]:
@@ -744,7 +744,7 @@ elif operation == "Remove existing slashing only":
                 update_col_r = find_update_col(df_r)
                 for i in slashed_r:
                     df_r.at[i, "Price"] = clean_price(df_r.at[i, "Markup Price"])
-                    df_r.at[i, "Markup Price"] = ""
+                    df_r.at[i, "Markup Price"] = "0"
                     df_r.at[i, update_col_r] = "Yes"
                 for pc in ["Price", "Markup Price"]:
                     df_r[pc] = df_r[pc].apply(clean_price)
