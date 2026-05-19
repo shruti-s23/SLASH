@@ -365,7 +365,8 @@ if operation == "Apply flat % discount":
         skipped_min = 0
 
         for i in df_apply.index[freeze_idx:]:
-            if scope_selected and str(df_apply.at[i, "Brand SKU ID Type"]).strip() not in scope_selected:
+            sku_type = str(df_apply.at[i, "Brand SKU ID Type"]).strip()
+            if scope_selected and sku_type in ("Item", "Variant", "Addon") and sku_type not in scope_selected:
                 continue
             if sel_cats_raw and str(df_apply.at[i, "Category"]).strip() not in sel_cats_raw:
                 continue
@@ -375,20 +376,23 @@ if operation == "Apply flat % discount":
                 continue
 
             raw_p = clean_price(df_apply.at[i, "Price"])
-            if raw_p == "":
+            if raw_p in ("", "0"):
                 continue
             try:
                 price_val = float(raw_p)
             except ValueError:
                 continue
-            if price_val == 0:
+            if price_val <= 0:
                 continue
             if min_price > 0 and price_val <= min_price:
                 skipped_min += 1
                 continue
 
-            df_apply.at[i, "Markup Price"] = raw_p
-            df_apply.at[i, "Price"] = str(round(price_val * factor))
+            markup_price = price_val
+            discounted_price = round(markup_price * factor)
+
+            df_apply.at[i, "Markup Price"] = str(int(markup_price)) if markup_price == int(markup_price) else str(markup_price)
+            df_apply.at[i, "Price"] = str(discounted_price)
             df_apply.at[i, update_col] = "Yes"
             applied += 1
 
