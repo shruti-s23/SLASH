@@ -144,7 +144,8 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
     )
 
     for pc in ["Price", "Markup Price"]:
-        raw[pc] = raw[pc].apply(clean_price)
+        raw[pc] = raw[pc].apply(clean_price).astype(str)
+        raw[pc] = raw[pc].replace("nan", "")
 
     freeze_idx_new = detect_freeze_index(raw)
 
@@ -260,7 +261,8 @@ else:
                     df_rm.at[i, update_col_rm] = "Yes"
 
                 for pc in ["Price", "Markup Price"]:
-                    df_rm[pc] = df_rm[pc].apply(clean_price)
+                    df_rm[pc] = df_rm[pc].apply(clean_price).astype(str)
+                    df_rm[pc] = df_rm[pc].replace("nan", "")
 
                 st.session_state.menu_df = df_rm.copy()
                 st.session_state.slash_removal_done = True
@@ -703,7 +705,8 @@ elif operation == "Use reference CSV":
                             mode=mode, addon_indices=addon_idx_mapped
                         )
                         for pc in ["Price", "Markup Price"]:
-                            updated_df[pc] = updated_df[pc].apply(clean_price)
+                            updated_df[pc] = updated_df[pc].apply(clean_price).astype(str)
+                            updated_df[pc] = updated_df[pc].replace("nan", "")
 
                         st.session_state.menu_df = updated_df.copy()
                         st.session_state.audit_log = detail_df
@@ -751,7 +754,8 @@ elif operation == "Remove existing slashing only":
                     df_r.at[i, "Markup Price"] = "0"
                     df_r.at[i, update_col_r] = "Yes"
                 for pc in ["Price", "Markup Price"]:
-                    df_r[pc] = df_r[pc].apply(clean_price)
+                    df_r[pc] = df_r[pc].apply(clean_price).astype(str)
+                    df_r[pc] = df_r[pc].replace("nan", "")
                 st.session_state.menu_df = df_r.copy()
                 st.session_state.remove_slash_only_done = True
                 st.session_state["_preview_df_post-removal preview"] = df_r.iloc[freeze_idx:].copy()
