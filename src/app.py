@@ -35,7 +35,7 @@ def clean_label(val):
 
 def clean_price(val):
     s = str(val).strip() if val is not None else ""
-    if s in ("", "nan", "None", "NaN", "none"):
+    if s in ("", "nan", "None", "NaN", "none", "<NA>"):
         return ""
     try:
         f = float(s)
@@ -44,6 +44,43 @@ def clean_price(val):
         return str(int(f)) if f == int(f) else str(round(f, 2))
     except Exception:
         return s
+
+
+def save_df(df: pd.DataFrame) -> None:
+    """Normalise Price/Markup Price to pure strings then store in session state.
+    Also store a dict backup of every non-empty price value keyed by (row_index, col)
+    so we can restore values that get lost during pickle serialisation."""
+    df = df.copy()
+    backup = {}
+    for col in ["Price", "Markup Price"]:
+        if col not in df.columns:
+            continue
+        df[col] = df[col].apply(clean_price)
+        df[col] = df[col].astype(str)
+        df[col] = df[col].replace({"nan": "", "None": "", "NaN": "", "<NA>": ""})
+        for idx, val in df[col].items():
+            if val not in ("", "0"):
+                backup[(idx, col)] = val
+    st.session_state.menu_df = df
+    st.session_state._price_backup = backup
+
+
+def load_df() -> pd.DataFrame:
+    """Read menu_df from session state and restore any Price/Markup Price values
+    that were corrupted by pickle serialisation."""
+    df = st.session_state.menu_df.copy()
+    backup = st.session_state.get("_price_backup", {})
+    for (idx, col), val in backup.items():
+        if idx in df.index and col in df.columns:
+            current = str(df.at[idx, col]).strip()
+            if current in ("", "nan", "None", "NaN", "<NA>"):
+                df.at[idx, col] = val
+    for col in ["Price", "Markup Price"]:
+        if col in df.columns:
+            df[col] = df[col].apply(clean_price)
+            df[col] = df[col].astype(str)
+            df[col] = df[col].replace({"nan": "", "None": "", "NaN": "", "<NA>": ""})
+    return df
 
 
 def show_preview(df, label="Preview"):
@@ -185,7 +222,7 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
     st.session_state.ref_apply_count = 0
     st.session_state.matching_ran = False
 
-    st.session_state.menu_df = raw.copy()
+    save_df(raw)
     st.session_state.freeze_idx = freeze_idx_new
     st.session_state.original_name = os.path.splitext(menu_file.name)[0]
     st.session_state.last_file_name = menu_file.name
@@ -239,7 +276,7 @@ else:
         )
         if remove_choice == "Yes — restore original prices":
             if st.button("Confirm removal", key="confirm_removal_btn"):
-                df_rm = st.session_state.menu_df.copy()
+                df_rm = load_df()
                 df_rm["Price"] = pd.to_numeric(df_rm["Price"], errors="coerce")
                 df_rm["Markup Price"] = pd.to_numeric(df_rm["Markup Price"], errors="coerce")
 
@@ -264,7 +301,7 @@ else:
                     df_rm[pc] = df_rm[pc].apply(clean_price).astype(str)
                     df_rm[pc] = df_rm[pc].replace("nan", "")
 
-                st.session_state.menu_df = df_rm.copy()
+                save_df(df_rm)
                 st.session_state.slash_removal_done = True
                 st.session_state["_preview_df_post-slash-removal preview"] = df_rm.iloc[freeze_idx:].copy()
                 st.rerun()
@@ -359,7 +396,7 @@ if operation == "Apply flat % discount":
 
     st.markdown(" ")
     if st.button("Apply Discount", key="apply_flat_btn", type="primary"):
-        df_apply = st.session_state.menu_df.copy()
+        df_apply = load_df()
 
         update_col = find_update_col(df_apply)
         factor = (100 - discount) / 100
@@ -398,7 +435,7 @@ if operation == "Apply flat % discount":
             df_apply.at[i, update_col] = "Yes"
             applied += 1
 
-        st.session_state.menu_df = df_apply.copy()
+        save_df(df_apply)
         st.session_state.flat_discount_done = True
         st.session_state["_preview_df_post-discount preview"] = df_apply.iloc[freeze_idx:].copy()
         msg = f"{discount}% discount applied to {applied} rows."
@@ -487,7 +524,7 @@ elif operation == "Use reference CSV":
         st.markdown(" ")
 
         if st.button("Run Matching", key="run_match_btn", type="primary"):
-            menu_working = st.session_state.menu_df.iloc[freeze_idx:].copy().reset_index(drop=True)
+            menu_working = load_df().iloc[freeze_idx:].copy().reset_index(drop=True)
             auto_m, hitl_q = match_items(menu_working, ref_df)
             st.session_state.auto_matches = auto_m
             st.session_state.hitl_queue = hitl_q
@@ -645,7 +682,7 @@ elif operation == "Use reference CSV":
 
                 st.markdown(" ")
 
-                menu_full = st.session_state.menu_df.copy()
+                menu_full = load_df()
                 addon_col_exists = any(c.strip().lower() == "addon" for c in menu_full.columns)
 
                 if addon_col_exists and not st.session_state.ref_apply_done:
@@ -677,7 +714,7 @@ elif operation == "Use reference CSV":
 
                 if not st.session_state.ref_apply_done:
                     if st.button("Apply All Confirmed Matches", key="apply_confirmed_btn", type="primary"):
-                        df_apply = st.session_state.menu_df.copy()
+                        df_apply = load_df()
                         df_apply["Price"] = pd.to_numeric(df_apply["Price"], errors="coerce")
                         df_apply["Markup Price"] = pd.to_numeric(df_apply["Markup Price"], errors="coerce")
                         df_apply["Price"] = df_apply["Price"].astype(object)
@@ -704,13 +741,9 @@ elif operation == "Use reference CSV":
                             df_apply, ref_df, confirmed_mapped,
                             mode=mode, addon_indices=addon_idx_mapped
                         )
-                        for pc in ["Price", "Markup Price"]:
-                            updated_df[pc] = updated_df[pc].apply(clean_price).astype(str)
-                            updated_df[pc] = updated_df[pc].replace("nan", "")
-
-                        st.session_state.menu_df = updated_df.copy()
+                        save_df(updated_df)
                         st.session_state.audit_log = detail_df
-                        st.session_state["_preview_df_post-ref-update preview"] = updated_df.iloc[freeze_idx:].copy()
+                        st.session_state["_preview_df_post-ref-update preview"] = load_df().iloc[freeze_idx:].copy()
                         st.session_state.ref_apply_done = True
                         st.session_state.ref_apply_count = len(confirmed_mapped)
                         st.rerun()
@@ -722,7 +755,7 @@ elif operation == "Use reference CSV":
 
 elif operation == "Remove existing slashing only":
 
-    df_r = st.session_state.menu_df.copy()
+    df_r = load_df()
     df_r["Price"] = pd.to_numeric(df_r["Price"], errors="coerce")
     df_r["Markup Price"] = pd.to_numeric(df_r["Markup Price"], errors="coerce")
 
@@ -753,12 +786,9 @@ elif operation == "Remove existing slashing only":
                     df_r.at[i, "Price"] = clean_price(df_r.at[i, "Markup Price"])
                     df_r.at[i, "Markup Price"] = "0"
                     df_r.at[i, update_col_r] = "Yes"
-                for pc in ["Price", "Markup Price"]:
-                    df_r[pc] = df_r[pc].apply(clean_price).astype(str)
-                    df_r[pc] = df_r[pc].replace("nan", "")
-                st.session_state.menu_df = df_r.copy()
+                save_df(df_r)
                 st.session_state.remove_slash_only_done = True
-                st.session_state["_preview_df_post-removal preview"] = df_r.iloc[freeze_idx:].copy()
+                st.session_state["_preview_df_post-removal preview"] = load_df().iloc[freeze_idx:].copy()
                 st.rerun()
 
     if st.session_state.get("remove_slash_only_done"):
@@ -793,7 +823,7 @@ if use_start or use_revert:
             revert_time_str = revert_time.strftime("%H:%M:%S")
 
     if st.button("Apply Dates to Updated Rows", key="apply_dates_btn", type="primary"):
-        df_dated = st.session_state.menu_df.copy()
+        df_dated = load_df()
         update_col_d = find_update_col(df_dated)
         count = 0
         for i in df_dated.index[freeze_idx:]:
@@ -809,7 +839,7 @@ if use_start or use_revert:
                     if "Revert Time" in df_dated.columns:
                         df_dated.at[i, "Revert Time"] = revert_time_str
                 count += 1
-        st.session_state.menu_df = df_dated.copy()
+        save_df(df_dated)
         st.success(f"Dates applied to {count} rows.")
 
 
@@ -818,7 +848,7 @@ section("⑤ Download Output")
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-final_df = st.session_state.menu_df.copy()
+final_df = load_df()
 for pc in ["Price", "Markup Price"]:
     if pc in final_df.columns:
         final_df[pc] = final_df[pc].apply(clean_price)
