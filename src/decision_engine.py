@@ -151,6 +151,14 @@ def match_items(menu_df, ref_df):
 
     menu_items = [str(menu_df.at[i, menu_item_col]) for i in menu_df.index]
     menu_addons = [str(menu_df.at[i, menu_addon_col]) if menu_addon_col else "" for i in menu_df.index]
+    menu_variants = [
+        str(menu_df.at[i, menu_variant_col]) if menu_variant_col else ""
+        for i in menu_df.index
+    ]
+    menu_sku_types = [
+        str(menu_df.at[i, menu_sku_type_col]).strip() if menu_sku_type_col else ""
+        for i in menu_df.index
+    ]
 
     score_matrix = {}
 
@@ -162,14 +170,40 @@ def match_items(menu_df, ref_df):
             flag = str(ref_df.at[r_idx, ref_addon_flag_col]).strip().lower()
             is_addon = flag in ("y", "yes", "1", "true")
 
-        search_pool = menu_addons if (is_addon and menu_addon_col) else menu_items
         ref_cat = normalize(ref_df.at[r_idx, ref_cat_col]) if ref_cat_col else ""
         ref_subcat = normalize(ref_df.at[r_idx, ref_subcat_col]) if ref_subcat_col else ""
-        ref_variant = normalize(ref_df.at[r_idx, ref_variant_col]) if ref_variant_col else ""
+        ref_variant_raw = str(ref_df.at[r_idx, ref_variant_col]).strip() if ref_variant_col else ""
+        ref_variant = normalize(ref_variant_raw)
+
+        has_variant = ref_variant not in ("", "nan", "none")
+
+        if is_addon and menu_addon_col:
+            search_pool = menu_addons
+        elif has_variant:
+            search_pool = menu_variants
+        else:
+            search_pool = menu_items
 
         for m_idx in menu_df.index:
+            sku_type = menu_sku_types[m_idx]
+
+            if is_addon and menu_addon_col:
+                pass
+            elif has_variant:
+                if sku_type not in ("Variant", ""):
+                    continue
+            else:
+                if sku_type == "Variant":
+                    continue
+
             pool_val = search_pool[m_idx]
-            item_score = score_pair(ref_item_raw, pool_val)
+            if has_variant and not is_addon:
+                item_score = score_pair(ref_item_raw, menu_items[m_idx])
+                variant_score = score_pair(ref_variant_raw, pool_val)
+                item_score = (item_score * 0.5 + variant_score * 0.5)
+            else:
+                item_score = score_pair(ref_item_raw, pool_val)
+
             if item_score < 50:
                 continue
 
@@ -213,7 +247,8 @@ def match_items(menu_df, ref_df):
         ref_item_raw = str(ref_df.at[r_idx, ref_item_col])
         ref_cat = normalize(ref_df.at[r_idx, ref_cat_col]) if ref_cat_col else ""
         ref_subcat = normalize(ref_df.at[r_idx, ref_subcat_col]) if ref_subcat_col else ""
-        ref_variant = normalize(ref_df.at[r_idx, ref_variant_col]) if ref_variant_col else ""
+        ref_variant_raw = str(ref_df.at[r_idx, ref_variant_col]).strip() if ref_variant_col else ""
+        ref_variant = normalize(ref_variant_raw)
 
         if r_idx in assigned_ref:
             m_idx, composite, is_addon = assigned_ref[r_idx]
@@ -231,7 +266,15 @@ def match_items(menu_df, ref_df):
                 flag = str(ref_df.at[r_idx, ref_addon_flag_col]).strip().lower()
                 is_addon = flag in ("y", "yes", "1", "true")
 
-            search_pool = menu_addons if (is_addon and menu_addon_col) else menu_items
+            ref_variant_raw = str(ref_df.at[r_idx, ref_variant_col]).strip() if ref_variant_col else ""
+            has_variant = normalize(ref_variant_raw) not in ("", "nan", "none")
+
+            if is_addon and menu_addon_col:
+                search_pool = menu_addons
+            elif has_variant:
+                search_pool = menu_variants
+            else:
+                search_pool = menu_items
 
             candidates_raw = [
                 (m_idx, score_matrix[(r_idx, m_idx)][0], score_matrix[(r_idx, m_idx)][1])
@@ -244,7 +287,12 @@ def match_items(menu_df, ref_df):
             candidate_display = []
             for m_idx, composite, item_score in top:
                 pool_val = search_pool[m_idx]
-                item_display = strip_ids(pool_val) if is_addon else strip_ids(menu_df.at[m_idx, menu_item_col])
+                if is_addon:
+                    item_display = strip_ids(pool_val)
+                elif has_variant:
+                    item_display = strip_ids(menu_items[m_idx])
+                else:
+                    item_display = strip_ids(menu_df.at[m_idx, menu_item_col])
                 candidate_display.append({
                     "menu_index": int(menu_df.index[m_idx]),
                     "menu_item": item_display,
