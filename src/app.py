@@ -47,39 +47,38 @@ def clean_price(val):
 
 
 def save_df(df: pd.DataFrame) -> None:
-    """Normalise Price/Markup Price to pure strings then store in session state.
-    Also store a dict backup of every non-empty price value keyed by (row_index, col)
-    so we can restore values that get lost during pickle serialisation."""
     df = df.copy()
-    backup = {}
     for col in ["Price", "Markup Price"]:
         if col not in df.columns:
             continue
-        df[col] = df[col].apply(clean_price)
-        df[col] = df[col].astype(str)
+        df[col] = df[col].apply(clean_price).astype(str)
         df[col] = df[col].replace({"nan": "", "None": "", "NaN": "", "<NA>": ""})
-        for idx, val in df[col].items():
-            if val not in ("", "0"):
-                backup[(idx, col)] = val
+    # store backup as plain Python dict — immune to pickle/pandas dtype issues
+    backup = {}
+    for col in ["Price", "Markup Price"]:
+        if col in df.columns:
+            for idx in df.index:
+                val = str(df.at[idx, col]).strip()
+                if val not in ("", "0", "nan", "None", "NaN", "<NA>"):
+                    backup[(int(idx), col)] = val
     st.session_state.menu_df = df
     st.session_state._price_backup = backup
 
 
 def load_df() -> pd.DataFrame:
-    """Read menu_df from session state and restore any Price/Markup Price values
-    that were corrupted by pickle serialisation."""
     df = st.session_state.menu_df.copy()
     backup = st.session_state.get("_price_backup", {})
-    for (idx, col), val in backup.items():
-        if idx in df.index and col in df.columns:
+    for col in ["Price", "Markup Price"]:
+        if col not in df.columns:
+            continue
+        for idx in df.index:
             current = str(df.at[idx, col]).strip()
             if current in ("", "nan", "None", "NaN", "<NA>"):
-                df.at[idx, col] = val
-    for col in ["Price", "Markup Price"]:
-        if col in df.columns:
-            df[col] = df[col].apply(clean_price)
-            df[col] = df[col].astype(str)
-            df[col] = df[col].replace({"nan": "", "None": "", "NaN": "", "<NA>": ""})
+                key = (int(idx), col)
+                if key in backup:
+                    df.at[idx, col] = backup[key]
+        df[col] = df[col].apply(clean_price).astype(str)
+        df[col] = df[col].replace({"nan": "", "None": "", "NaN": "", "<NA>": ""})
     return df
 
 
@@ -582,97 +581,97 @@ elif operation == "Use reference CSV":
             cursor = st.session_state.hitl_cursor
 
             if cursor < len(queue):
-                item = queue[cursor]
-                st.markdown("---")
-                st.progress(cursor / len(queue), text=f"Review {cursor + 1} of {len(queue)}")
-                st.markdown(" ")
-
-                badge = "🔖 Addon" if item.get("is_addon") else "🍽 Item"
-
-                ref_price_display = ""
-                if ref_price_col:
-                    try:
-                        ref_price_display = clean_price(ref_df.iloc[item["ref_index"]][ref_price_col])
-                    except Exception:
-                        ref_price_display = ""
-
-                price_note = f" — ₹{ref_price_display}" if ref_price_display else ""
-                st.markdown(f"**{badge} — Reference:** `{item['ref_item']}`{price_note}")
-
-                meta_parts = []
-                if item["ref_cat"]:
-                    meta_parts.append(f"Category: `{item['ref_cat']}`")
-                if item["ref_subcat"]:
-                    meta_parts.append(f"Subcategory: `{item['ref_subcat']}`")
-                if item["ref_variant"]:
-                    meta_parts.append(f"Variant: `{item['ref_variant']}`")
-                if meta_parts:
-                    st.markdown("  ·  ".join(meta_parts))
-
-                candidates = item.get("candidates", [])
-
-                if not candidates:
-                    st.info("No candidates found for this item.")
-                    if st.button("Skip →", key=f"skip_nc_{cursor}"):
-                        st.session_state.hitl_cursor += 1
-                        st.rerun()
-                else:
-                    st.caption("Candidates ranked by confidence — top is most likely.")
+                with st.expander(f"Review item {cursor + 1} of {len(queue)}", expanded=True):
+                    item = queue[cursor]
+                    st.progress(cursor / len(queue), text=f"Review {cursor + 1} of {len(queue)}")
                     st.markdown(" ")
 
-                    options = ["— Skip this item —"] + [
-                        "  ·  ".join(filter(None, [
-                            c["menu_item"] if c["menu_item"] not in ("", "nan") else None,
-                            c["menu_cat"] if c["menu_cat"] not in ("", "nan") else None,
-                            c["menu_subcat"] if c["menu_subcat"] not in ("", "nan") else None,
-                            c["menu_variant"] if c["menu_variant"] not in ("", "nan") else None,
-                            f"₹{c['menu_price']}" if c.get("menu_price") and c["menu_price"] not in ("", "nan") else None,
-                        ]))
-                        for c in candidates
-                    ]
-                    choice = st.radio("Select the correct match:", options, key=f"hitl_{cursor}")
+                    badge = "🔖 Addon" if item.get("is_addon") else "🍽 Item"
 
-                    is_addon_item = item.get("is_addon", False)
-                    if is_addon_item:
-                        apply_all = st.checkbox(
-                            "Apply same pricing wherever this item appears as an addon across the menu",
-                            key=f"apply_all_{cursor}",
-                        )
+                    ref_price_display = ""
+                    if ref_price_col:
+                        try:
+                            ref_price_display = clean_price(ref_df.iloc[item["ref_index"]][ref_price_col])
+                        except Exception:
+                            ref_price_display = ""
+
+                    price_note = f" — ₹{ref_price_display}" if ref_price_display else ""
+                    st.markdown(f"**{badge} — Reference:** `{item['ref_item']}`{price_note}")
+
+                    meta_parts = []
+                    if item["ref_cat"]:
+                        meta_parts.append(f"Category: `{item['ref_cat']}`")
+                    if item["ref_subcat"]:
+                        meta_parts.append(f"Subcategory: `{item['ref_subcat']}`")
+                    if item["ref_variant"]:
+                        meta_parts.append(f"Variant: `{item['ref_variant']}`")
+                    if meta_parts:
+                        st.markdown("  ·  ".join(meta_parts))
+
+                    candidates = item.get("candidates", [])
+
+                    if not candidates:
+                        st.info("No candidates found for this item.")
+                        if st.button("Skip →", key=f"skip_nc_{cursor}"):
+                            st.session_state.hitl_cursor += 1
+                            st.rerun()
                     else:
-                        apply_all = False
+                        st.caption("Candidates ranked by confidence — top is most likely.")
+                        st.markdown(" ")
 
-                    col_confirm, col_skip = st.columns([1, 4])
-                    if col_confirm.button("Confirm ✓", key=f"confirm_{cursor}", type="primary"):
-                        if choice != "— Skip this item —":
-                            ci = options.index(choice) - 1
-                            c = candidates[ci]
-                            st.session_state.confirmed_matches.append({
-                                "ref_index": item["ref_index"],
-                                "menu_index": c["menu_index"],
-                                "item": item["ref_item"],
-                                "auto": False,
-                                "is_addon": item.get("is_addon", False),
-                            })
-                            if apply_all:
-                                norm_name = item["ref_item"].lower().strip()
-                                for fut in queue[cursor + 1:]:
-                                    if fut["ref_item"].lower().strip() == norm_name:
-                                        for fc in fut.get("candidates", []):
-                                            if fc["menu_item"].lower().strip() == c["menu_item"].lower().strip():
-                                                st.session_state.confirmed_matches.append({
-                                                    "ref_index": fut["ref_index"],
-                                                    "menu_index": fc["menu_index"],
-                                                    "item": fut["ref_item"],
-                                                    "auto": False,
-                                                    "is_addon": fut.get("is_addon", False),
-                                                })
-                                                break
-                        st.session_state.hitl_cursor += 1
-                        st.rerun()
+                        options = ["— Skip this item —"] + [
+                            "  ·  ".join(filter(None, [
+                                c["menu_item"] if c["menu_item"] not in ("", "nan") else None,
+                                c["menu_cat"] if c["menu_cat"] not in ("", "nan") else None,
+                                c["menu_subcat"] if c["menu_subcat"] not in ("", "nan") else None,
+                                c["menu_variant"] if c["menu_variant"] not in ("", "nan") else None,
+                                f"₹{c['menu_price']}" if c.get("menu_price") and c["menu_price"] not in ("", "nan") else None,
+                            ]))
+                            for c in candidates
+                        ]
+                        choice = st.radio("Select the correct match:", options, key=f"hitl_{cursor}")
 
-                    if col_skip.button("Skip →", key=f"skip_{cursor}"):
-                        st.session_state.hitl_cursor += 1
-                        st.rerun()
+                        is_addon_item = item.get("is_addon", False)
+                        if is_addon_item:
+                            apply_all = st.checkbox(
+                                "Apply same pricing wherever this item appears as an addon across the menu",
+                                key=f"apply_all_{cursor}",
+                            )
+                        else:
+                            apply_all = False
+
+                        col_confirm, col_skip = st.columns([1, 4])
+                        if col_confirm.button("Confirm ✓", key=f"confirm_{cursor}", type="primary"):
+                            if choice != "— Skip this item —":
+                                ci = options.index(choice) - 1
+                                c = candidates[ci]
+                                st.session_state.confirmed_matches.append({
+                                    "ref_index": item["ref_index"],
+                                    "menu_index": c["menu_index"],
+                                    "item": item["ref_item"],
+                                    "auto": False,
+                                    "is_addon": item.get("is_addon", False),
+                                })
+                                if apply_all:
+                                    norm_name = item["ref_item"].lower().strip()
+                                    for fut in queue[cursor + 1:]:
+                                        if fut["ref_item"].lower().strip() == norm_name:
+                                            for fc in fut.get("candidates", []):
+                                                if fc["menu_item"].lower().strip() == c["menu_item"].lower().strip():
+                                                    st.session_state.confirmed_matches.append({
+                                                        "ref_index": fut["ref_index"],
+                                                        "menu_index": fc["menu_index"],
+                                                        "item": fut["ref_item"],
+                                                        "auto": False,
+                                                        "is_addon": fut.get("is_addon", False),
+                                                    })
+                                                    break
+                            st.session_state.hitl_cursor += 1
+                            st.rerun()
+
+                        if col_skip.button("Skip →", key=f"skip_{cursor}"):
+                            st.session_state.hitl_cursor += 1
+                            st.rerun()
 
             else:
                 if len(queue) > 0:
