@@ -259,6 +259,7 @@ def match_items(menu_df, ref_df):
                 "score": round(composite),
                 "auto": True,
                 "is_addon": is_addon,
+                "menu_sku_type": menu_sku_types[m_idx],
             })
         else:
             is_addon = False
@@ -300,6 +301,7 @@ def match_items(menu_df, ref_df):
                     "menu_subcat": strip_ids(str(menu_df.at[m_idx, menu_subcat_col])) if menu_subcat_col else "",
                     "menu_variant": strip_ids(str(menu_df.at[m_idx, menu_variant_col])) if menu_variant_col else "",
                     "menu_price": str(menu_df.at[m_idx, menu_price_col]) if menu_price_col else "",
+                    "menu_sku_type": menu_sku_types[m_idx],
                     "score": round(composite),
                 })
 
@@ -353,12 +355,16 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
         old_markup = df.at[idx, "Markup Price"] if "Markup Price" in df.columns else None
 
         if mode == "slash":
-            if pd.notna(ref_base) and pd.notna(ref_revised):
+            if ref_base is not None and pd.notna(ref_base) and ref_revised is not None and pd.notna(ref_revised):
+                # both given: base goes to Markup, revised goes to Price
                 df.at[idx, "Markup Price"] = ref_base
                 df.at[idx, "Price"] = ref_revised
-            elif pd.isna(ref_base) and pd.notna(ref_revised):
-                df.at[idx, "Markup Price"] = ref_revised
-            elif pd.notna(ref_base) and pd.isna(ref_revised):
+            elif (ref_base is None or pd.isna(ref_base)) and ref_revised is not None and pd.notna(ref_revised):
+                # only revised given: current Price moves to Markup, revised goes to Price
+                df.at[idx, "Markup Price"] = old_price
+                df.at[idx, "Price"] = ref_revised
+            elif ref_base is not None and pd.notna(ref_base) and (ref_revised is None or pd.isna(ref_revised)):
+                # only base given: just set Markup Price
                 df.at[idx, "Markup Price"] = ref_base
             try:
                 markup_val = float(df.at[idx, "Markup Price"])
@@ -366,8 +372,9 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
                     df.at[idx, "Markup Price"] = None
             except Exception:
                 pass
+
         elif mode == "replace":
-            if pd.notna(ref_revised):
+            if ref_revised is not None and pd.notna(ref_revised):
                 df.at[idx, "Price"] = ref_revised
             df.at[idx, "Markup Price"] = None
 
