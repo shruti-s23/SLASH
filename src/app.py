@@ -571,6 +571,7 @@ elif operation == "Use reference CSV":
                         "Ref Price (₹)": ref_price,
                         "Matched To": matched_item,
                         "Menu Price (₹)": menu_price,
+                        "SKU Type": m.get("menu_sku_type", ""),
                         "Type": "Addon" if m.get("is_addon") else "Item",
                     })
 
@@ -622,6 +623,7 @@ elif operation == "Use reference CSV":
                         options = ["— Skip this item —"] + [
                             "  ·  ".join(filter(None, [
                                 c["menu_item"] if c["menu_item"] not in ("", "nan") else None,
+                                f"[{c['menu_sku_type']}]" if c.get("menu_sku_type") and c["menu_sku_type"] not in ("", "nan") else None,
                                 c["menu_cat"] if c["menu_cat"] not in ("", "nan") else None,
                                 c["menu_subcat"] if c["menu_subcat"] not in ("", "nan") else None,
                                 c["menu_variant"] if c["menu_variant"] not in ("", "nan") else None,
