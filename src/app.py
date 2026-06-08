@@ -19,10 +19,6 @@ METADATA_KEYWORDS = [
 ]
 
 
-# ─── NUMERIC HELPERS ──────────────────────────────────────────────────────────
-# Price and Markup Price are stored as float64 throughout.
-# NaN = no value. Never use strings for prices internally.
-
 def to_float(val):
     if val is None:
         return np.nan
@@ -49,17 +45,11 @@ def fmt_price(val):
 def normalise_price_col(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series.apply(to_float), errors="coerce").astype("float64")
 
-
-# ─── SESSION SAVE / LOAD ──────────────────────────────────────────────────────
-# Prices stored as float64. Backup dict (plain Python) guards against pickle corruption.
-
 def save_df(df: pd.DataFrame) -> None:
     df = df.copy()
     for col in ["Price", "Markup Price"]:
         if col in df.columns:
             df[col] = normalise_price_col(df[col])
-    # store every non-nan price as plain Python (int, str, float) tuples
-    # tuples of native Python types are 100% pickle-stable
     backup = []
     for col in ["Price", "Markup Price"]:
         if col in df.columns:
@@ -77,16 +67,12 @@ def load_df() -> pd.DataFrame:
     for col in ["Price", "Markup Price"]:
         if col in df.columns:
             df[col] = normalise_price_col(df[col])
-    # restore every value from backup — overwrite, not just fill NaN
-    # this is the only source of truth for prices
+
     backup = st.session_state.get("_price_backup", [])
     for (idx, col, val) in backup:
         if idx in df.index and col in df.columns:
             df.at[idx, col] = float(val)
     return df
-
-
-# ─── MISC HELPERS ─────────────────────────────────────────────────────────────
 
 def detect_freeze_index(df):
     for i in df.index:
@@ -151,9 +137,6 @@ def render_preview(label: str):
 def store_preview(label: str, df: pd.DataFrame):
     st.session_state[f"_preview_df_{label}"] = df.copy()
 
-
-# ─── SESSION DEFAULTS ─────────────────────────────────────────────────────────
-
 DEFAULTS = {
     "menu_df": None, "freeze_idx": 0, "original_name": None,
     "last_file_name": None, "_price_backup": {},
@@ -170,9 +153,6 @@ DEFAULTS = {
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
-
-# ─── UPLOAD ────────────────────────────────────────────────────────────────────
 
 st.title("Price Revision")
 st.markdown(" ")
@@ -266,9 +246,6 @@ c3.metric("Row Types", " · ".join(available_types) if available_types else "N/A
 render_preview("initial")
 st.markdown(" ")
 
-
-# ─── SLASHING DETECTION ────────────────────────────────────────────────────────
-
 section("② Slashing Detection")
 snap = st.session_state.slash_snapshot
 
@@ -324,9 +301,6 @@ else:
 
 st.markdown(" ")
 
-
-# ─── OPERATION ────────────────────────────────────────────────────────────────
-
 section("③ Operation")
 operation = st.selectbox(
     "What would you like to do?",
@@ -334,9 +308,6 @@ operation = st.selectbox(
     key="operation_select",
 )
 st.markdown(" ")
-
-
-# ── FLAT DISCOUNT ─────────────────────────────────────────────────────────────
 
 if operation == "Apply flat % discount":
 
