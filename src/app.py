@@ -58,30 +58,31 @@ def save_df(df: pd.DataFrame) -> None:
     for col in ["Price", "Markup Price"]:
         if col in df.columns:
             df[col] = normalise_price_col(df[col])
-    backup = {}
+    # store every non-nan price as plain Python (int, str, float) tuples
+    # tuples of native Python types are 100% pickle-stable
+    backup = []
     for col in ["Price", "Markup Price"]:
         if col in df.columns:
             for idx in df.index:
                 v = df.at[idx, col]
-                if isinstance(v, float) and not np.isnan(v) and v != 0.0:
-                    backup[(int(idx), col)] = v
+                if isinstance(v, float) and not np.isnan(v):
+                    backup.append((int(idx), col, float(v)))
     st.session_state.menu_df = df
     st.session_state._price_backup = backup
 
 
 def load_df() -> pd.DataFrame:
     df = st.session_state.menu_df.copy()
-    backup = st.session_state.get("_price_backup", {})
+    # force both price columns to float64 first
     for col in ["Price", "Markup Price"]:
-        if col not in df.columns:
-            continue
-        df[col] = normalise_price_col(df[col])
-        for idx in df.index:
-            v = df.at[idx, col]
-            if isinstance(v, float) and np.isnan(v):
-                key = (int(idx), col)
-                if key in backup:
-                    df.at[idx, col] = backup[key]
+        if col in df.columns:
+            df[col] = normalise_price_col(df[col])
+    # restore every value from backup — overwrite, not just fill NaN
+    # this is the only source of truth for prices
+    backup = st.session_state.get("_price_backup", [])
+    for (idx, col, val) in backup:
+        if idx in df.index and col in df.columns:
+            df.at[idx, col] = float(val)
     return df
 
 
