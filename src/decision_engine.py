@@ -1,10 +1,17 @@
 import re
+import math
 import pandas as pd
 import numpy as np
 from datetime import datetime
 from rapidfuzz import fuzz
+from collections import Counter
+
 
 AUTO_THRESHOLD = 90
+CANDIDATE_MIN  = 62
+ITEM_NAME_GATE = 55
+FOOD_GROUP_PENALTY = 35
+
 
 CANONICAL_MAP = {
     "gravy": "curry", "masala": "curry", "korma": "curry", "salan": "curry",
@@ -52,7 +59,30 @@ CANONICAL_MAP = {
     "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
     "piece": "pc", "pieces": "pc", "pcs": "pc",
     "pack": "pack", "portion": "portion", "serving": "serving",
+    "chocolate": "chocolate", "choco": "chocolate",
+    "vanilla": "vanilla", "strawberry": "strawberry",
+    "mango": "mango", "banana": "banana", "oreo": "oreo",
 }
+
+FOOD_GROUPS = [
+    {"burger", "chicken burger", "veg burger", "patty"},
+    {"pizza", "calzone"},
+    {"pasta", "spaghetti", "penne", "fettuccine", "lasagna"},
+    {"biryani", "pulao", "fried rice", "rice"},
+    {"noodles", "chowmein", "hakka"},
+    {"momos", "dumpling", "dimsum"},
+    {"shake", "milkshake", "smoothie", "icecream"},
+    {"soup"},
+    {"bread", "roti", "naan", "paratha", "puri", "bhatura"},
+    {"curry", "gravy", "dal"},
+    {"salad", "bowl"},
+    {"dosa", "idli", "vada", "sambar"},
+    {"shawarma", "kebab", "roll", "wrap", "sandwich"},
+    {"sushi", "ramen"},
+    {"taco", "burrito", "hummus", "falafel"},
+    {"soft drink", "soda", "juice"},
+    {"chocolate", "vanilla", "strawberry"},
+]
 
 
 def strip_ids(text):
@@ -69,97 +99,208 @@ def normalize(text):
     s = re.sub(r"\(.*?\)", "", s)
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    for key, val in CANONICAL_MAP.items():
+    for key, val in sorted(CANONICAL_MAP.items(), key=lambda x: -len(x[0])):
         s = re.sub(r"\b" + re.escape(key) + r"\b", val, s)
     return s
 
 
-def score_pair(ref_text, menu_text):
+def _tokens(text):
+    return set(normalize(text).split())
+
+
+def _food_group(token_set):
+    for gi, group in enumerate(FOOD_GROUPS):
+        if token_set & group:
+            return gi
+    return -1
+
+
+def build_idf(menu_df, item_col):
+    doc_freq: Counter = Counter()
+    docs = menu_df[item_col].dropna().tolist()
+    N = max(len(docs), 1)
+    for doc in docs:
+        for tok in _tokens(str(doc)):
+            doc_freq[tok] += 1
+    return {tok: math.log((N + 1) / (freq + 1)) + 1 for tok, freq in doc_freq.items()}, N
+
+
+def _idf_weighted_jaccard(ref_tokens, menu_tokens, idf):
+    inter = ref_tokens & menu_tokens
+    union = ref_tokens | menu_tokens
+    if not union:
+        return 0.0
+    num = sum(idf.get(t, 1.0) for t in inter)
+    den = sum(idf.get(t, 1.0) for t in union)
+    return (num / den) * 100 if den else 0.0
+
+
+def score_pair(ref_text, menu_text, idf=None):
     rn = normalize(ref_text)
     mn = normalize(menu_text)
     if not rn or not mn:
         return 0
 
-    s_ratio = fuzz.ratio(rn, mn)
-    s_sort = fuzz.token_sort_ratio(rn, mn)
-    s_set = fuzz.token_set_ratio(rn, mn)
+    s_sort    = fuzz.token_sort_ratio(rn, mn)
+    s_set     = fuzz.token_set_ratio(rn, mn)
     s_partial = fuzz.partial_ratio(rn, mn)
+    base      = max(s_sort, s_set, s_partial)
 
-    base = max(s_ratio, s_sort, s_set, s_partial)
+    if idf:
+        ref_tok  = set(rn.split())
+        menu_tok = set(mn.split())
+        idf_j    = _idf_weighted_jaccard(ref_tok, menu_tok, idf)
+        base     = base * 0.7 + idf_j * 0.3
 
-    ref_tokens = set(rn.split())
-    menu_tokens = set(mn.split())
-    if ref_tokens != menu_tokens and (ref_tokens < menu_tokens or menu_tokens < ref_tokens):
-        extra = len(ref_tokens.symmetric_difference(menu_tokens))
-        penalty = min(extra * 4, 18)
-        base = max(0, base - penalty)
+    ref_tok  = set(rn.split())
+    menu_tok = set(mn.split())
+    extra    = len(ref_tok.symmetric_difference(menu_tok))
+    penalty  = min(extra * 3, 15)
+    return max(0, base - penalty)
 
-    return base
+
+def _composite_score(
+    ref_text, menu_text,
+    ref_variant_raw, menu_variant,
+    ref_cat, menu_cat,
+    ref_subcat, menu_subcat,
+    has_variant, idf=None
+):
+    item_score = score_pair(ref_text, menu_text, idf=idf)
+    if item_score < ITEM_NAME_GATE:
+        return None, item_score
+
+    ref_group  = _food_group(_tokens(ref_text))
+    menu_group = _food_group(_tokens(menu_text))
+    cross_penalty = FOOD_GROUP_PENALTY if (
+        ref_group != -1 and menu_group != -1 and ref_group != menu_group
+    ) else 0
+
+    composite = item_score - cross_penalty
+    if composite < ITEM_NAME_GATE:
+        return None, item_score
+
+    weight = 1.0
+    total  = composite
+
+    if has_variant:
+        v_score = score_pair(ref_variant_raw, menu_variant, idf=None)
+        total  += v_score * 0.6
+        weight += 0.6
+
+    if ref_cat and menu_cat:
+        cs      = fuzz.token_sort_ratio(ref_cat, normalize(menu_cat))
+        total  += cs * 0.15
+        weight += 0.15
+
+    if ref_subcat and menu_subcat:
+        ss      = fuzz.token_sort_ratio(ref_subcat, normalize(menu_subcat))
+        total  += ss * 0.08
+        weight += 0.08
+
+    return total / weight, item_score
+
+
+def effective_current_price(price, markup_price):
+    def _f(v):
+        try:
+            f = float(str(v).strip())
+            return f if not math.isnan(f) else None
+        except Exception:
+            return None
+    vals = [x for x in (_f(price), _f(markup_price)) if x is not None]
+    return max(vals) if vals else None
 
 
 def match_items(menu_df, ref_df):
     menu_df = menu_df.copy().reset_index(drop=True)
-    ref_df = ref_df.copy().reset_index(drop=True)
+    ref_df  = ref_df.copy().reset_index(drop=True)
 
     ref_item_col = next(
-        (c for c in ref_df.columns if "item" in c.lower()
-         and "group" not in c.lower() and "addon" not in c.lower()), None)
+        (c for c in ref_df.columns
+         if "item" in c.lower() and "group" not in c.lower() and "addon" not in c.lower()),
+        None)
     if ref_item_col is None:
         raise ValueError("Could not find Item column in reference CSV.")
 
-    ref_cat_col = next((c for c in ref_df.columns if "category" in c.lower() and "sub" not in c.lower()), None)
-    ref_subcat_col = next((c for c in ref_df.columns if "subcategory" in c.lower()), None)
-    ref_variant_col = next((c for c in ref_df.columns if "variant" in c.lower()), None)
+    ref_cat_col      = next((c for c in ref_df.columns if "category" in c.lower() and "sub" not in c.lower()), None)
+    ref_subcat_col   = next((c for c in ref_df.columns if "subcategory" in c.lower()), None)
+    ref_variant_col  = next((c for c in ref_df.columns if "variant" in c.lower()), None)
     ref_addon_flag_col = next(
-        (c for c in ref_df.columns if "add" in c.lower() and ("on" in c.lower() or "addon" in c.lower())), None)
+        (c for c in ref_df.columns if "add" in c.lower() and ("on" in c.lower() or "addon" in c.lower())),
+        None)
 
-    menu_item_col = next((c for c in menu_df.columns if c.strip().lower() == "item"), None)
-    menu_addon_col = next((c for c in menu_df.columns if c.strip().lower() == "addon"), None)
-    menu_cat_col = next((c for c in menu_df.columns if "category" in c.lower() and "sub" not in c.lower()), None)
+    menu_item_col   = next((c for c in menu_df.columns if c.strip().lower() == "item"), None)
+    menu_addon_col  = next((c for c in menu_df.columns if c.strip().lower() == "addon"), None)
+    menu_cat_col    = next((c for c in menu_df.columns if "category" in c.lower() and "sub" not in c.lower()), None)
     menu_subcat_col = next((c for c in menu_df.columns if "subcategory" in c.lower()), None)
-    menu_variant_col = next(
-        (c for c in menu_df.columns if "variant" in c.lower() and "group" not in c.lower()
-         and "food" not in c.lower() and "avail" not in c.lower() and c.lower().endswith("l1")), None)
+
+    menu_vg1_col = next(
+        (c for c in menu_df.columns
+         if "variant group" in c.lower() and "l1" in c.lower()),
+        None)
+
+    menu_v1_col = next(
+        (c for c in menu_df.columns
+         if re.search(r"va[ir]+an[t]?s?\s*l1", c.lower())
+         and "group" not in c.lower()
+         and "food" not in c.lower()
+         and "avail" not in c.lower()),
+        None)
+
+    menu_desc_col = next(
+        (c for c in menu_df.columns
+         if "description" in c.lower() or c.strip().lower() == "item description"),
+        None)
+
     menu_price_col = "Price" if "Price" in menu_df.columns else None
-    menu_sku_type_col = next((c for c in menu_df.columns if "sku" in c.lower() and "type" in c.lower()), None)
+    menu_sku_col   = next((c for c in menu_df.columns if "sku" in c.lower() and "type" in c.lower()), None)
 
     if menu_item_col is None:
         raise ValueError("Could not find Item column in menu CSV.")
 
-    menu_items = [str(menu_df.at[i, menu_item_col]) for i in menu_df.index]
-    menu_addons = [str(menu_df.at[i, menu_addon_col]) if menu_addon_col else "" for i in menu_df.index]
-    menu_variants = [str(menu_df.at[i, menu_variant_col]) if menu_variant_col else "" for i in menu_df.index]
-    menu_sku_types = [str(menu_df.at[i, menu_sku_type_col]).strip() if menu_sku_type_col else "" for i in menu_df.index]
+    def _col_vals(col):
+        if col:
+            return [str(menu_df.at[i, col]) for i in menu_df.index]
+        return [""] * len(menu_df)
+
+    menu_items     = _col_vals(menu_item_col)
+    menu_addons    = _col_vals(menu_addon_col)
+    menu_cats      = _col_vals(menu_cat_col)
+    menu_subcats   = _col_vals(menu_subcat_col)
+    menu_vg1s      = _col_vals(menu_vg1_col)
+    menu_v1s       = _col_vals(menu_v1_col)
+    menu_descs     = _col_vals(menu_desc_col)
+    menu_sku_types = _col_vals(menu_sku_col)
 
     def get_price(m_idx):
         if menu_price_col:
-            v = menu_df.at[m_idx, menu_price_col]
             try:
-                return float(v)
+                return float(menu_df.at[m_idx, menu_price_col])
             except Exception:
                 return None
         return None
 
-    score_matrix = {}
+    idf, _ = build_idf(menu_df, menu_item_col)
+
+    score_matrix: dict = {}
 
     for r_idx in ref_df.index:
-        ref_item_raw = str(ref_df.at[r_idx, ref_item_col])
-
-        is_addon = False
+        ref_item_raw    = str(ref_df.at[r_idx, ref_item_col])
+        is_addon        = False
         if ref_addon_flag_col:
-            flag = str(ref_df.at[r_idx, ref_addon_flag_col]).strip().lower()
+            flag     = str(ref_df.at[r_idx, ref_addon_flag_col]).strip().lower()
             is_addon = flag in ("y", "yes", "1", "true")
 
-        ref_cat = normalize(ref_df.at[r_idx, ref_cat_col]) if ref_cat_col else ""
-        ref_subcat = normalize(ref_df.at[r_idx, ref_subcat_col]) if ref_subcat_col else ""
+        ref_cat         = normalize(ref_df.at[r_idx, ref_cat_col])   if ref_cat_col    else ""
+        ref_subcat      = normalize(ref_df.at[r_idx, ref_subcat_col]) if ref_subcat_col else ""
         ref_variant_raw = str(ref_df.at[r_idx, ref_variant_col]).strip() if ref_variant_col else ""
-        ref_variant = normalize(ref_variant_raw)
-        has_variant = ref_variant not in ("", "nan", "none")
+        ref_variant     = normalize(ref_variant_raw)
+        has_variant     = ref_variant not in ("", "nan", "none")
 
         for m_idx in menu_df.index:
-            sku_type = menu_sku_types[m_idx]
+            sku_type = menu_sku_types[m_idx].strip()
 
-            # strict SKU type gating
             if is_addon:
                 if sku_type != "Addon":
                     continue
@@ -167,76 +308,62 @@ def match_items(menu_df, ref_df):
                 if sku_type not in ("Variant", ""):
                     continue
             else:
-                # plain item: skip Variant and Addon rows
                 if sku_type in ("Variant", "Addon"):
                     continue
 
-            if is_addon:
-                item_score = score_pair(ref_item_raw, menu_addons[m_idx])
-            elif has_variant:
-                # combine item name context + variant name match
-                item_score_name = score_pair(ref_item_raw, menu_items[m_idx])
-                variant_score = score_pair(ref_variant_raw, menu_variants[m_idx])
-                item_score = item_score_name * 0.4 + variant_score * 0.6
-            else:
-                item_score = score_pair(ref_item_raw, menu_items[m_idx])
+            ref_text  = ref_item_raw
+            menu_text = menu_addons[m_idx] if is_addon else menu_items[m_idx]
 
-            if item_score < 38:
+            composite, item_score = _composite_score(
+                ref_text, menu_text,
+                ref_variant_raw if has_variant else "",
+                menu_v1s[m_idx],
+                ref_cat,    menu_cats[m_idx],
+                ref_subcat, menu_subcats[m_idx],
+                has_variant,
+                idf=idf,
+            )
+
+            if composite is None or composite < CANDIDATE_MIN:
                 continue
 
-            total = item_score
-            weight = 1.0
-
-            if ref_cat and menu_cat_col:
-                cs = fuzz.token_sort_ratio(ref_cat, normalize(str(menu_df.at[m_idx, menu_cat_col])))
-                total += cs * 0.18
-                weight += 0.18
-
-            if ref_subcat and menu_subcat_col:
-                ss = fuzz.token_sort_ratio(ref_subcat, normalize(str(menu_df.at[m_idx, menu_subcat_col])))
-                total += ss * 0.1
-                weight += 0.1
-
-            composite = total / weight
             score_matrix[(r_idx, m_idx)] = (composite, item_score, is_addon)
 
-    all_pairs = sorted(score_matrix.items(), key=lambda x: x[1][0], reverse=True)
-
-    assigned_menu = {}
-    assigned_ref = {}
+    all_pairs     = sorted(score_matrix.items(), key=lambda x: x[1][0], reverse=True)
+    assigned_menu: dict = {}
+    assigned_ref:  dict = {}
 
     for (r_idx, m_idx), (composite, item_score, is_addon) in all_pairs:
         if r_idx in assigned_ref or m_idx in assigned_menu:
             continue
         if composite >= AUTO_THRESHOLD:
-            assigned_ref[r_idx] = (m_idx, composite, is_addon)
+            assigned_ref[r_idx]  = (m_idx, composite, is_addon)
             assigned_menu[m_idx] = r_idx
 
     auto_matches = []
-    hitl_queue = []
+    hitl_queue   = []
 
     for r_idx in ref_df.index:
-        ref_item_raw = str(ref_df.at[r_idx, ref_item_col])
-        ref_cat = normalize(ref_df.at[r_idx, ref_cat_col]) if ref_cat_col else ""
-        ref_subcat = normalize(ref_df.at[r_idx, ref_subcat_col]) if ref_subcat_col else ""
+        ref_item_raw    = str(ref_df.at[r_idx, ref_item_col])
+        ref_cat         = normalize(ref_df.at[r_idx, ref_cat_col])   if ref_cat_col    else ""
+        ref_subcat      = normalize(ref_df.at[r_idx, ref_subcat_col]) if ref_subcat_col else ""
         ref_variant_raw = str(ref_df.at[r_idx, ref_variant_col]).strip() if ref_variant_col else ""
-        ref_variant = normalize(ref_variant_raw)
-        has_variant = ref_variant not in ("", "nan", "none")
-
-        is_addon = False
+        ref_variant     = normalize(ref_variant_raw)
+        has_variant     = ref_variant not in ("", "nan", "none")
+        is_addon        = False
         if ref_addon_flag_col:
-            flag = str(ref_df.at[r_idx, ref_addon_flag_col]).strip().lower()
+            flag     = str(ref_df.at[r_idx, ref_addon_flag_col]).strip().lower()
             is_addon = flag in ("y", "yes", "1", "true")
 
         if r_idx in assigned_ref:
             m_idx, composite, is_addon_m = assigned_ref[r_idx]
             auto_matches.append({
-                "ref_index": r_idx,
-                "menu_index": int(menu_df.index[m_idx]),
-                "item": ref_item_raw,
-                "score": round(composite),
-                "auto": True,
-                "is_addon": is_addon_m,
+                "ref_index":     r_idx,
+                "menu_index":    int(menu_df.index[m_idx]),
+                "item":          ref_item_raw,
+                "score":         round(composite),
+                "auto":          True,
+                "is_addon":      is_addon_m,
                 "menu_sku_type": menu_sku_types[m_idx],
             })
         else:
@@ -253,34 +380,40 @@ def match_items(menu_df, ref_df):
                 if is_addon:
                     item_display = strip_ids(menu_addons[m_idx])
                 elif has_variant:
-                    item_display = f"{strip_ids(menu_items[m_idx])} · {strip_ids(menu_variants[m_idx])}"
+                    item_display = f"{strip_ids(menu_items[m_idx])} · {strip_ids(menu_v1s[m_idx])}"
                 else:
                     item_display = strip_ids(menu_items[m_idx])
 
-                price_raw = get_price(m_idx)
-                price_str = str(int(price_raw)) if price_raw is not None and not np.isnan(price_raw) and price_raw == int(price_raw) else (str(round(price_raw, 2)) if price_raw is not None else "")
+                p = get_price(m_idx)
+                price_str = (
+                    str(int(p)) if p is not None and not math.isnan(p) and p == int(p)
+                    else (str(round(p, 2)) if p is not None else "")
+                )
 
                 candidate_display.append({
-                    "menu_index": int(menu_df.index[m_idx]),
-                    "menu_item": item_display,
-                    "menu_cat": strip_ids(str(menu_df.at[m_idx, menu_cat_col])) if menu_cat_col else "",
-                    "menu_subcat": strip_ids(str(menu_df.at[m_idx, menu_subcat_col])) if menu_subcat_col else "",
-                    "menu_variant": strip_ids(menu_variants[m_idx]),
-                    "menu_price": price_str,
-                    "menu_sku_type": menu_sku_types[m_idx],
-                    "score": round(composite),
+                    "menu_index":             int(menu_df.index[m_idx]),
+                    "menu_item":              item_display,
+                    "menu_sku_type":          menu_sku_types[m_idx],
+                    "menu_cat":               strip_ids(menu_cats[m_idx]),
+                    "menu_subcat":            strip_ids(menu_subcats[m_idx]),
+                    "menu_variant_group_l1":  strip_ids(menu_vg1s[m_idx]),
+                    "menu_variant_l1":        strip_ids(menu_v1s[m_idx]),
+                    "menu_description":       strip_ids(menu_descs[m_idx]),
+                    "menu_variant":           strip_ids(menu_v1s[m_idx]),
+                    "menu_price":             price_str,
+                    "score":                  round(composite),
                 })
 
             hitl_queue.append({
-                "ref_index": r_idx,
-                "ref_item": ref_item_raw,
-                "ref_cat": ref_cat,
-                "ref_subcat": ref_subcat,
-                "ref_variant": ref_variant,
-                "is_addon": is_addon,
+                "ref_index":    r_idx,
+                "ref_item":     ref_item_raw,
+                "ref_cat":      ref_cat,
+                "ref_subcat":   ref_subcat,
+                "ref_variant":  ref_variant,
+                "is_addon":     is_addon,
                 "search_label": "addon" if is_addon else ("variant" if has_variant else "item"),
-                "candidates": candidate_display,
-                "score": round(top[0][1]) if top else 0,
+                "candidates":   candidate_display,
+                "score":        round(top[0][1]) if top else 0,
             })
 
     return auto_matches, hitl_queue
@@ -301,13 +434,16 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
     df = menu_df.copy()
 
     ref_item_col = next(
-        (c for c in ref_df.columns if "item" in c.lower()
-         and "group" not in c.lower() and "addon" not in c.lower()), None)
-    base_col = next((c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()), None)
+        (c for c in ref_df.columns
+         if "item" in c.lower() and "group" not in c.lower() and "addon" not in c.lower()),
+        None)
+    base_col = next(
+        (c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()),
+        None)
     if base_col is None:
         base_col = next((c for c in ref_df.columns if "base" in c.lower()), None)
     revised_col = next((c for c in ref_df.columns if "revised" in c.lower()), None)
-    update_col = next(
+    update_col  = next(
         (c for c in df.columns if c.strip().lower().startswith("update required")),
         "Update Required ?")
 
@@ -318,29 +454,25 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
             return None
         try:
             f = float(str(val).strip())
-            return None if np.isnan(f) else f
+            return None if math.isnan(f) else f
         except Exception:
             return None
 
     def safe_price(val):
         f = safe_float(val)
-        if f is None:
-            return None
-        if pd.isna(f):
-            return None
-        return f
+        return f if f is not None else None
 
     def apply_pricing(idx, ref_base, ref_revised, reason, ref_item_name):
-        old_price = safe_price(df.at[idx, "Price"])
+        old_price  = safe_price(df.at[idx, "Price"])
         old_markup = safe_price(df.at[idx, "Markup Price"]) if "Markup Price" in df.columns else None
 
         if mode == "slash":
             if ref_base is not None and ref_revised is not None:
                 df.at[idx, "Markup Price"] = ref_base
-                df.at[idx, "Price"] = ref_revised
+                df.at[idx, "Price"]        = ref_revised
             elif ref_base is None and ref_revised is not None:
                 df.at[idx, "Markup Price"] = old_price if old_price else np.nan
-                df.at[idx, "Price"] = ref_revised
+                df.at[idx, "Price"]        = ref_revised
             elif ref_base is not None and ref_revised is None:
                 df.at[idx, "Markup Price"] = ref_base
             new_markup = safe_price(df.at[idx, "Markup Price"])
@@ -355,67 +487,72 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
         df.at[idx, update_col] = "Yes"
 
         changed_rows.append({
-            "Ref Item": ref_item_name,
-            "Menu Item": str(df.at[idx, "Item"]) if "Item" in df.columns else "",
-            "Category": str(df.at[idx, "Category"]) if "Category" in df.columns else "",
+            "Ref Item":          ref_item_name,
+            "Menu Item":         str(df.at[idx, "Item"]) if "Item" in df.columns else "",
+            "Category":          str(df.at[idx, "Category"]) if "Category" in df.columns else "",
             "Old Selling Price": old_price,
             "New Selling Price": safe_price(df.at[idx, "Price"]),
-            "Old Base Price": old_markup,
-            "New Base Price": safe_price(df.at[idx, "Markup Price"]) if "Markup Price" in df.columns else None,
-            "Reason": reason,
+            "Old Base Price":    old_markup,
+            "New Base Price":    safe_price(df.at[idx, "Markup Price"]) if "Markup Price" in df.columns else None,
+            "Reason":            reason,
         })
 
     for m in confirmed_matches:
-        r_idx = m["ref_index"]
+        r_idx    = m["ref_index"]
         menu_idx = m["menu_index"]
-        r = ref_df.loc[r_idx]
+        r        = ref_df.loc[r_idx]
 
-        ref_base = safe_float(r[base_col]) if base_col and str(r.get(base_col, "")).strip() not in ("", "nan") else None
+        ref_base    = safe_float(r[base_col])    if base_col    and str(r.get(base_col,    "")).strip() not in ("", "nan") else None
         ref_revised = safe_float(r[revised_col]) if revised_col and str(r.get(revised_col, "")).strip() not in ("", "nan") else None
         ref_item_name = str(r[ref_item_col]) if ref_item_col else ""
 
-        apply_pricing(menu_idx, ref_base, ref_revised, "auto match" if m.get("auto") else "user confirmed", ref_item_name)
+        apply_pricing(menu_idx, ref_base, ref_revised,
+                      "auto match" if m.get("auto") else "user confirmed",
+                      ref_item_name)
 
         if addon_indices and menu_idx in addon_indices:
             for addon_idx in addon_indices[menu_idx]:
                 apply_pricing(addon_idx, ref_base, ref_revised, "addon propagation", ref_item_name)
 
-    # build summary: every ref row, matched or not
-    detail_df = pd.DataFrame(changed_rows) if changed_rows else pd.DataFrame()
-    matched_ref_indices = {m["ref_index"] for m in confirmed_matches}
-    matched_map = {m["ref_index"]: m["menu_index"] for m in confirmed_matches}
+    detail_df       = pd.DataFrame(changed_rows) if changed_rows else pd.DataFrame()
+    matched_ref_idx = {m["ref_index"] for m in confirmed_matches}
+    matched_map     = {m["ref_index"]: m["menu_index"] for m in confirmed_matches}
+
+    def _fmt(v):
+        if v is None:
+            return ""
+        try:
+            return str(int(v)) if float(v) == int(float(v)) else str(round(float(v), 2))
+        except Exception:
+            return str(v)
 
     summary_rows = []
     for r_idx in ref_df.index:
-        r = ref_df.loc[r_idx]
-        ref_name = str(r[ref_item_col]) if ref_item_col else ""
-        ref_revised_val = str(r[revised_col]).strip() if revised_col and pd.notna(r.get(revised_col)) else ""
-        ref_base_val = str(r[base_col]).strip() if base_col and pd.notna(r.get(base_col)) else ""
+        r            = ref_df.loc[r_idx]
+        ref_name     = str(r[ref_item_col]) if ref_item_col else ""
+        ref_rev_val  = str(r[revised_col]).strip() if revised_col and pd.notna(r.get(revised_col)) else ""
+        ref_base_val = str(r[base_col]).strip()    if base_col    and pd.notna(r.get(base_col))    else ""
 
-        if r_idx in matched_ref_indices:
-            menu_idx = matched_map[r_idx]
-            menu_item = str(df.at[menu_idx, "Item"]) if "Item" in df.columns else ""
-            new_price = safe_price(df.at[menu_idx, "Price"])
+        if r_idx in matched_ref_idx:
+            menu_idx   = matched_map[r_idx]
+            menu_item  = str(df.at[menu_idx, "Item"]) if "Item" in df.columns else ""
+            new_price  = safe_price(df.at[menu_idx, "Price"])
             new_markup = safe_price(df.at[menu_idx, "Markup Price"]) if "Markup Price" in df.columns else None
+            eff_price  = effective_current_price(new_price, new_markup)
             summary_rows.append({
-                "Ref Item": ref_name,
-                "Ref Base Price": ref_base_val,
-                "Ref Revised Price": ref_revised_val,
-                "Matched To": menu_item,
-                "New Menu Price": str(int(new_price)) if new_price and new_price == int(new_price) else (str(new_price) if new_price else ""),
-                "New Markup Price": str(int(new_markup)) if new_markup and new_markup == int(new_markup) else (str(new_markup) if new_markup else ""),
-                "Status": "Matched",
+                "Ref Item Name":           ref_name,
+                "Ref Base Price":          ref_base_val,
+                "Matched Menu Item":       menu_item,
+                "Effective Current Price": _fmt(eff_price),
+                "Status":                  "Matched",
             })
         else:
             summary_rows.append({
-                "Ref Item": ref_name,
-                "Ref Base Price": ref_base_val,
-                "Ref Revised Price": ref_revised_val,
-                "Matched To": "",
-                "New Menu Price": "",
-                "New Markup Price": "",
-                "Status": "Not matched — update manually",
+                "Ref Item Name":           ref_name,
+                "Ref Base Price":          ref_base_val,
+                "Matched Menu Item":       "",
+                "Effective Current Price": "",
+                "Status":                  "Not matched — update manually",
             })
 
-    audit_entry = pd.DataFrame(summary_rows)
-    return df, audit_entry, detail_df
+    return df, pd.DataFrame(summary_rows), detail_df
