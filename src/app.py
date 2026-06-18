@@ -63,7 +63,6 @@ def save_df(df: pd.DataFrame) -> None:
 
 def load_df() -> pd.DataFrame:
     df = st.session_state.menu_df.copy()
-    # force both price columns to float64 first
     for col in ["Price", "Markup Price"]:
         if col in df.columns:
             df[col] = normalise_price_col(df[col])
@@ -184,14 +183,12 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
         if col not in raw.columns:
             raw[col] = default
 
-    # clear previous Yes flags so re-uploads start clean
     raw["Update Required ?"] = raw["Update Required ?"].apply(
         lambda x: "" if str(x).strip() == "Yes" else x
     )
 
     freeze_idx_new = detect_freeze_index(raw)
 
-    # build slashing snapshot before numeric normalisation
     snap_p = pd.to_numeric(raw["Price"], errors="coerce")
     snap_m = pd.to_numeric(raw.get("Markup Price", pd.Series(dtype=float)), errors="coerce")
     snap_mask = snap_p.notna() & snap_m.notna() & (snap_m > snap_p)
@@ -211,7 +208,6 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
     else:
         st.session_state.slash_snapshot = None
 
-    # reset all state
     for k in ["auto_matches", "hitl_queue", "confirmed_matches", "addon_indices", "hitl_history"]:
         st.session_state[k] = [] if k != "addon_indices" else {}
     st.session_state.hitl_cursor = 0
@@ -292,7 +288,6 @@ else:
                     df_rm.at[i, update_col_rm] = "Yes"
                 save_df(df_rm)
                 st.session_state.slash_removal_done = True
-                # store preview as fresh numeric df — flat discount will load_df() fresh
                 store_preview("post-slash-removal", load_df().iloc[freeze_idx:])
                 st.rerun()
     else:
@@ -361,7 +356,6 @@ if operation == "Apply flat % discount":
 
     st.markdown(" ")
     if st.button("Apply Discount", key="apply_flat_btn", type="primary"):
-        # always load fresh numeric df — mutually exclusive from slashing state
         df_apply = load_df()
         update_col = find_update_col(df_apply)
         factor = (100 - discount) / 100
@@ -402,8 +396,6 @@ if operation == "Apply flat % discount":
     if st.session_state.get("flat_discount_done"):
         render_preview("post-discount")
 
-
-# ── REFERENCE CSV ─────────────────────────────────────────────────────────────
 
 elif operation == "Use reference CSV":
 
@@ -466,7 +458,6 @@ elif operation == "Use reference CSV":
 
         ref_df = st.session_state.ref_df.copy()
 
-        # Reference CSV preview — expandable inline
         n_ref = len(ref_df)
         ref_exp = st.session_state.get("_ref_preview_exp", False)
         with st.expander("Reference CSV preview", expanded=False):
@@ -500,34 +491,42 @@ elif operation == "Use reference CSV":
             st.markdown(" ")
 
             if n_auto > 0:
-                menu_prev = load_df().iloc[freeze_idx:].reset_index(drop=True)
-                ref_price_col = next((c for c in ref_df.columns if "revised" in c.lower()), None)
+                menu_prev      = load_df().iloc[freeze_idx:].reset_index(drop=True)
+                ref_price_col  = next((c for c in ref_df.columns if "revised" in c.lower()), None)
+                ref_base_col   = next((c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()), None)
+
                 auto_rows = []
                 for m in st.session_state.auto_matches:
                     try:
-                        matched_item = clean_label(str(menu_prev.at[m["menu_index"], "Item"]))
-                        menu_price = fmt_price(menu_prev.at[m["menu_index"], "Price"])
+                        menu_row   = menu_prev.iloc[m["menu_index"]]
+                        menu_item  = clean_label(str(menu_row.get("Item", "")))
+                        raw_price  = to_float(menu_row.get("Price",        ""))
+                        raw_markup = to_float(menu_row.get("Markup Price", ""))
+                        eff_vals   = [v for v in (raw_price, raw_markup) if not np.isnan(v)]
+                        eff_price  = fmt_price(max(eff_vals)) if eff_vals else ""
                     except Exception:
-                        matched_item, menu_price = "—", ""
-                    ref_price = ""
-                    if ref_price_col:
+                        menu_item = "—"
+                        eff_price = ""
+
+                    ref_base_display = ""
+                    if ref_base_col:
                         try:
-                            ref_price = str(ref_df.iloc[m["ref_index"]][ref_price_col]).strip()
+                            ref_base_display = str(ref_df.iloc[m["ref_index"]][ref_base_col]).strip()
                         except Exception:
                             pass
+
                     auto_rows.append({
-                        "Reference Item": m["item"],
-                        "Ref Revised Price (₹)": ref_price,
-                        "Matched To": matched_item,
-                        "Menu Price (₹)": menu_price,
-                        "SKU Type": m.get("menu_sku_type", ""),
+                        "Ref Item Name":          m["item"],
+                        "Ref Base Price":         ref_base_display,
+                        "Matched Menu Item":      menu_item,
+                        "Effective Current Price": eff_price,
+                        "SKU Type":               m.get("menu_sku_type", ""),
                     })
                 with st.expander(f"View {n_auto} auto-matched rows"):
                     st.dataframe(pd.DataFrame(auto_rows), use_container_width=True)
 
-            queue = st.session_state.hitl_queue
+            queue  = st.session_state.hitl_queue
             cursor = st.session_state.hitl_cursor
-            ref_price_col = next((c for c in ref_df.columns if "revised" in c.lower()), None)
 
             if cursor < len(queue):
                 item = queue[cursor]
@@ -536,18 +535,19 @@ elif operation == "Use reference CSV":
                     st.markdown(" ")
 
                     badge = "🔖 Addon" if item.get("is_addon") else "🍽 Item"
+                    ref_price_col_hitl = next((c for c in ref_df.columns if "revised" in c.lower()), None)
                     ref_price_display = ""
-                    if ref_price_col:
+                    if ref_price_col_hitl:
                         try:
-                            ref_price_display = str(ref_df.iloc[item["ref_index"]][ref_price_col]).strip()
+                            ref_price_display = str(ref_df.iloc[item["ref_index"]][ref_price_col_hitl]).strip()
                         except Exception:
                             pass
                     price_note = f" — ₹{ref_price_display}" if ref_price_display else ""
                     st.markdown(f"**{badge}** `{item['ref_item']}`{price_note}")
 
                     meta = []
-                    if item.get("ref_cat"): meta.append(f"Cat: `{item['ref_cat']}`")
-                    if item.get("ref_subcat"): meta.append(f"Sub: `{item['ref_subcat']}`")
+                    if item.get("ref_cat"):     meta.append(f"Cat: `{item['ref_cat']}`")
+                    if item.get("ref_subcat"):  meta.append(f"Sub: `{item['ref_subcat']}`")
                     if item.get("ref_variant"): meta.append(f"Variant: `{item['ref_variant']}`")
                     if meta:
                         st.markdown("  ·  ".join(meta))
@@ -562,13 +562,32 @@ elif operation == "Use reference CSV":
                             st.rerun()
                     else:
                         st.caption("Candidates ranked by confidence — top is most likely.")
+
+                        cand_table_rows = []
+                        for c in candidates:
+                            cand_table_rows.append({
+                                "Brand SKU Type":    c.get("menu_sku_type", ""),
+                                "Item Name":         c.get("menu_item", ""),
+                                "Variant Group L1":  c.get("menu_variant_group_l1", ""),
+                                "Variants L1":       c.get("menu_variant_l1", ""),
+                                "Description":       c.get("menu_description", ""),
+                                "Price (₹)":         c.get("menu_price", ""),
+                                "Category":          c.get("menu_cat", ""),
+                                "Subcategory":       c.get("menu_subcat", ""),
+                            })
+                        st.dataframe(
+                            pd.DataFrame(cand_table_rows),
+                            use_container_width=True,
+                            hide_index=False,
+                        )
+                        st.caption("Select by row number below (0 = first row)")
+
                         options = ["— Skip this item —"] + [
                             "  ·  ".join(filter(None, [
-                                c["menu_item"] if c.get("menu_item") not in ("", "nan", None) else None,
+                                c["menu_item"]    if c.get("menu_item")    not in ("", "nan", None) else None,
                                 f"[{c['menu_sku_type']}]" if c.get("menu_sku_type") not in ("", "nan", None) else None,
-                                c["menu_cat"] if c.get("menu_cat") not in ("", "nan", None) else None,
-                                c["menu_subcat"] if c.get("menu_subcat") not in ("", "nan", None) else None,
-                                c["menu_variant"] if c.get("menu_variant") not in ("", "nan", None) else None,
+                                c["menu_variant_group_l1"] if c.get("menu_variant_group_l1") not in ("", "nan", None) else None,
+                                c["menu_variant_l1"]       if c.get("menu_variant_l1")       not in ("", "nan", None) else None,
                                 f"₹{c['menu_price']}" if c.get("menu_price") not in ("", "nan", None) else None,
                             ]))
                             for c in candidates
@@ -587,13 +606,13 @@ elif operation == "Use reference CSV":
                         if col_confirm.button("Confirm ✓", key=f"confirm_{cursor}", type="primary"):
                             if choice != "— Skip this item —":
                                 ci = options.index(choice) - 1
-                                c = candidates[ci]
+                                c  = candidates[ci]
                                 entry = {
-                                    "ref_index": item["ref_index"],
+                                    "ref_index":  item["ref_index"],
                                     "menu_index": c["menu_index"],
-                                    "item": item["ref_item"],
-                                    "auto": False,
-                                    "is_addon": item.get("is_addon", False),
+                                    "item":       item["ref_item"],
+                                    "auto":       False,
+                                    "is_addon":   item.get("is_addon", False),
                                 }
                                 st.session_state.confirmed_matches.append(entry)
                                 st.session_state.hitl_history.append(("confirm", cursor, entry))
@@ -604,11 +623,11 @@ elif operation == "Use reference CSV":
                                             for fc in fut.get("candidates", []):
                                                 if fc["menu_item"].lower().strip() == c["menu_item"].lower().strip():
                                                     extra = {
-                                                        "ref_index": fut["ref_index"],
+                                                        "ref_index":  fut["ref_index"],
                                                         "menu_index": fc["menu_index"],
-                                                        "item": fut["ref_item"],
-                                                        "auto": False,
-                                                        "is_addon": fut.get("is_addon", False),
+                                                        "item":       fut["ref_item"],
+                                                        "auto":       False,
+                                                        "is_addon":   fut.get("is_addon", False),
                                                     }
                                                     st.session_state.confirmed_matches.append(extra)
                                                     break
@@ -622,7 +641,6 @@ elif operation == "Use reference CSV":
                             st.session_state.hitl_cursor += 1
                             st.rerun()
 
-                        # Rollback — undo last action
                         history = st.session_state.get("hitl_history", [])
                         if history and col_undo.button("↩ Undo", key=f"undo_{cursor}"):
                             last_action, last_cursor, last_entry = history.pop()
@@ -692,10 +710,15 @@ elif operation == "Use reference CSV":
 
                 if st.session_state.ref_apply_done:
                     st.success(f"✓ Pricing applied to {st.session_state.ref_apply_count} rows.")
+
+                    audit = st.session_state.audit_log
+                    if audit is not None and not audit.empty:
+                        st.markdown("#### Match Summary")
+                        summary_display = audit.copy()
+                        st.dataframe(summary_display, use_container_width=True)
+
                     render_preview("post-ref-update")
 
-
-# ── REMOVE SLASHING ONLY ──────────────────────────────────────────────────────
 
 elif operation == "Remove existing slashing only":
     df_r = load_df()
@@ -728,12 +751,10 @@ elif operation == "Remove existing slashing only":
         render_preview("post-removal")
 
 
-# ─── DATES ────────────────────────────────────────────────────────────────────
-
 st.markdown(" ")
 section("④ Start & Revert Date / Time (Optional)")
 
-use_start = st.toggle("Set a Start Date & Time", value=False, key="use_start_toggle")
+use_start  = st.toggle("Set a Start Date & Time",  value=False, key="use_start_toggle")
 use_revert = st.toggle("Set a Revert Date & Time", value=False, key="use_revert_toggle")
 
 if use_start or use_revert:
@@ -742,7 +763,7 @@ if use_start or use_revert:
     if use_start:
         with dt1:
             st.markdown("**Start**")
-            sd = st.date_input("Start Date", key="start_date_input")
+            sd   = st.date_input("Start Date", key="start_date_input")
             st_t = st.time_input("Start Time", key="start_time_input", step=60)
             s_date, s_time = sd.strftime("%Y-%m-%d"), st_t.strftime("%H:%M:%S")
     if use_revert:
@@ -753,14 +774,14 @@ if use_start or use_revert:
             r_date, r_time = rd.strftime("%Y-%m-%d"), rt.strftime("%H:%M:%S")
 
     if st.button("Apply Dates to Updated Rows", key="apply_dates_btn", type="primary"):
-        df_dated = load_df()
+        df_dated    = load_df()
         update_col_d = find_update_col(df_dated)
         count = 0
         for i in df_dated.index[freeze_idx:]:
             if str(df_dated.at[i, update_col_d]).strip() == "Yes":
                 if use_start:
-                    if "Start Date" in df_dated.columns: df_dated.at[i, "Start Date"] = s_date
-                    if "Start Time" in df_dated.columns: df_dated.at[i, "Start Time"] = s_time
+                    if "Start Date"  in df_dated.columns: df_dated.at[i, "Start Date"]  = s_date
+                    if "Start Time"  in df_dated.columns: df_dated.at[i, "Start Time"]  = s_time
                 if use_revert:
                     if "Revert Date" in df_dated.columns: df_dated.at[i, "Revert Date"] = r_date
                     if "Revert Time" in df_dated.columns: df_dated.at[i, "Revert Time"] = r_time
@@ -768,8 +789,6 @@ if use_start or use_revert:
         save_df(df_dated)
         st.success(f"Dates applied to {count} rows.")
 
-
-# ─── DOWNLOAD ─────────────────────────────────────────────────────────────────
 
 st.markdown(" ")
 section("⑤ Download Output")
@@ -780,7 +799,7 @@ for col in ["Price", "Markup Price"]:
         final_df[col] = final_df[col].apply(fmt_price)
 final_df = final_df.fillna("")
 
-ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
 name = st.session_state.original_name
 
 col_d1, col_d2 = st.columns(2)
