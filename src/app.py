@@ -496,6 +496,7 @@ elif operation == "Use reference CSV":
                 ref_base_col   = next((c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()), None)
 
                 auto_rows = []
+                increase_count = 0
                 for m in st.session_state.auto_matches:
                     try:
                         menu_row   = menu_prev.iloc[m["menu_index"]]
@@ -503,9 +504,11 @@ elif operation == "Use reference CSV":
                         raw_price  = to_float(menu_row.get("Price",        ""))
                         raw_markup = to_float(menu_row.get("Markup Price", ""))
                         eff_vals   = [v for v in (raw_price, raw_markup) if not np.isnan(v)]
-                        eff_price  = fmt_price(max(eff_vals)) if eff_vals else ""
+                        eff_price_val = max(eff_vals) if eff_vals else None
+                        eff_price  = fmt_price(eff_price_val) if eff_price_val is not None else ""
                     except Exception:
                         menu_item = "—"
+                        eff_price_val = None
                         eff_price = ""
 
                     ref_base_display = ""
@@ -515,15 +518,51 @@ elif operation == "Use reference CSV":
                         except Exception:
                             pass
 
+                    ref_revised_display = ""
+                    ref_revised_val = None
+                    if ref_price_col:
+                        try:
+                            ref_revised_display = str(ref_df.iloc[m["ref_index"]][ref_price_col]).strip()
+                            ref_revised_val = to_float(ref_revised_display)
+                            if np.isnan(ref_revised_val):
+                                ref_revised_val = None
+                        except Exception:
+                            pass
+
+                    will_increase = (
+                        eff_price_val is not None and ref_revised_val is not None
+                        and ref_revised_val > eff_price_val
+                    )
+                    if will_increase:
+                        increase_count += 1
+
                     auto_rows.append({
-                        "Ref Item Name":          m["item"],
-                        "Ref Base Price":         ref_base_display,
-                        "Matched Menu Item":      menu_item,
+                        "Ref Item Name":           m["item"],
+                        "Ref Base Price":          ref_base_display,
+                        "Ref Revised Price":       ref_revised_display,
+                        "Matched Menu Item":       menu_item,
                         "Effective Current Price": eff_price,
-                        "SKU Type":               m.get("menu_sku_type", ""),
+                        "SKU Type":                m.get("menu_sku_type", ""),
+                        "⚠ Price Increase":       "YES — REVIEW" if will_increase else "",
                     })
-                with st.expander(f"View {n_auto} auto-matched rows"):
-                    st.dataframe(pd.DataFrame(auto_rows), use_container_width=True)
+
+                if increase_count > 0:
+                    st.error(
+                        f"⚠ {increase_count} auto-matched row(s) would INCREASE in price "
+                        f"compared to the current menu price. Review before applying."
+                    )
+
+                with st.expander(f"View {n_auto} auto-matched rows", expanded=increase_count > 0):
+                    auto_df = pd.DataFrame(auto_rows)
+                    if increase_count > 0:
+                        def _hl(row):
+                            return [
+                                "background-color: #ffcccc; font-weight: bold;" if row["⚠ Price Increase"] else ""
+                                for _ in row
+                            ]
+                        st.dataframe(auto_df.style.apply(_hl, axis=1), use_container_width=True)
+                    else:
+                        st.dataframe(auto_df, use_container_width=True)
 
             queue  = st.session_state.hitl_queue
             cursor = st.session_state.hitl_cursor
@@ -713,9 +752,29 @@ elif operation == "Use reference CSV":
 
                     audit = st.session_state.audit_log
                     if audit is not None and not audit.empty:
+                        n_increased = 0
+                        if "⚠ Price Increased" in audit.columns:
+                            n_increased = (audit["⚠ Price Increased"] == "YES — REVIEW").sum()
+
+                        if n_increased > 0:
+                            st.error(
+                                f"⚠ {n_increased} row(s) ended up with a HIGHER price than before "
+                                f"this update. Review the flagged rows below."
+                            )
+
                         st.markdown("#### Match Summary")
                         summary_display = audit.copy()
-                        st.dataframe(summary_display, use_container_width=True)
+
+                        if n_increased > 0 and "⚠ Price Increased" in summary_display.columns:
+                            def _hl_summary(row):
+                                flagged = row.get("⚠ Price Increased", "") == "YES — REVIEW"
+                                return [
+                                    "background-color: #ffcccc; font-weight: bold;" if flagged else ""
+                                    for _ in row
+                                ]
+                            st.dataframe(summary_display.style.apply(_hl_summary, axis=1), use_container_width=True)
+                        else:
+                            st.dataframe(summary_display, use_container_width=True)
 
                     render_preview("post-ref-update")
 
@@ -764,14 +823,18 @@ if use_start or use_revert:
         with dt1:
             st.markdown("**Start**")
             sd   = st.date_input("Start Date", key="start_date_input")
-            st_t = st.time_input("Start Time", key="start_time_input", step=60)
-            s_date, s_time = sd.strftime("%Y-%m-%d"), st_t.strftime("%H:%M:%S")
+            st_t = st.time_input("Start Time (HH:MM)", key="start_time_input", step=1)
+            s_sec = st.number_input("Seconds", min_value=0, max_value=59, value=0, step=1, key="start_sec_input")
+            s_date = sd.strftime("%Y-%m-%d")
+            s_time = f"{st_t.strftime('%H:%M')}:{int(s_sec):02d}"
     if use_revert:
         with dt2:
             st.markdown("**Revert**")
             rd = st.date_input("Revert Date", key="revert_date_input")
-            rt = st.time_input("Revert Time", key="revert_time_input", step=60)
-            r_date, r_time = rd.strftime("%Y-%m-%d"), rt.strftime("%H:%M:%S")
+            rt = st.time_input("Revert Time (HH:MM)", key="revert_time_input", step=1)
+            r_sec = st.number_input("Seconds", min_value=0, max_value=59, value=0, step=1, key="revert_sec_input")
+            r_date = rd.strftime("%Y-%m-%d")
+            r_time = f"{rt.strftime('%H:%M')}:{int(r_sec):02d}"
 
     if st.button("Apply Dates to Updated Rows", key="apply_dates_btn", type="primary"):
         df_dated    = load_df()
