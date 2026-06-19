@@ -7,7 +7,7 @@ from rapidfuzz import fuzz
 from collections import Counter
 
 
-AUTO_THRESHOLD = 90
+AUTO_THRESHOLD = 82
 CANDIDATE_MIN  = 62
 ITEM_NAME_GATE = 55
 FOOD_GROUP_PENALTY = 35
@@ -88,15 +88,18 @@ FOOD_GROUPS = [
 def strip_ids(text):
     if pd.isna(text):
         return ""
-    return re.sub(r"\s*\(.*?\)\s*", " ", str(text)).strip()
+    s = str(text).strip()
+    s = re.sub(r"^\s*\(\s*[\w\-]+\s*\)\s*", "", s)
+    return s.strip()
 
 
 def normalize(text):
     if pd.isna(text) or str(text).strip() == "":
         return ""
     s = str(text).lower().strip()
-    s = re.sub(r"\[.*?\]", "", s)
-    s = re.sub(r"\(.*?\)", "", s)
+    s = re.sub(r"^\s*\[\s*[\w\-]+\s*\]\s*", "", s)
+    s = re.sub(r"^\s*\(\s*[\w\-]+\s*\)\s*", "", s)
+    s = re.sub(r"[\[\]()]", " ", s)
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     for key, val in sorted(CANONICAL_MAP.items(), key=lambda x: -len(x[0])):
@@ -465,6 +468,7 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
     def apply_pricing(idx, ref_base, ref_revised, reason, ref_item_name):
         old_price  = safe_price(df.at[idx, "Price"])
         old_markup = safe_price(df.at[idx, "Markup Price"]) if "Markup Price" in df.columns else None
+        old_effective = effective_current_price(old_price, old_markup)
 
         if mode == "slash":
             if ref_base is not None and ref_revised is not None:
@@ -486,16 +490,32 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
 
         df.at[idx, update_col] = "Yes"
 
+        new_price_val  = safe_price(df.at[idx, "Price"])
+        new_markup_val = safe_price(df.at[idx, "Markup Price"]) if "Markup Price" in df.columns else None
+        new_effective  = effective_current_price(new_price_val, new_markup_val)
+
+        price_increased = (
+            old_effective is not None and new_effective is not None
+            and new_effective > old_effective
+        )
+
         changed_rows.append({
-            "Ref Item":          ref_item_name,
-            "Menu Item":         str(df.at[idx, "Item"]) if "Item" in df.columns else "",
-            "Category":          str(df.at[idx, "Category"]) if "Category" in df.columns else "",
-            "Old Selling Price": old_price,
-            "New Selling Price": safe_price(df.at[idx, "Price"]),
-            "Old Base Price":    old_markup,
-            "New Base Price":    safe_price(df.at[idx, "Markup Price"]) if "Markup Price" in df.columns else None,
-            "Reason":            reason,
+            "Ref Item":              ref_item_name,
+            "Menu Item":             str(df.at[idx, "Item"]) if "Item" in df.columns else "",
+            "Category":              str(df.at[idx, "Category"]) if "Category" in df.columns else "",
+            "Old Selling Price":     old_price,
+            "New Selling Price":     new_price_val,
+            "Old Base Price":        old_markup,
+            "New Base Price":        new_markup_val,
+            "Old Effective Price":   old_effective,
+            "New Effective Price":   new_effective,
+            "Price Increased":       price_increased,
+            "Reason":                reason,
         })
+
+        return old_effective, new_effective, price_increased
+
+    increase_flags = {}
 
     for m in confirmed_matches:
         r_idx    = m["ref_index"]
@@ -506,9 +526,11 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
         ref_revised = safe_float(r[revised_col]) if revised_col and str(r.get(revised_col, "")).strip() not in ("", "nan") else None
         ref_item_name = str(r[ref_item_col]) if ref_item_col else ""
 
-        apply_pricing(menu_idx, ref_base, ref_revised,
-                      "auto match" if m.get("auto") else "user confirmed",
-                      ref_item_name)
+        old_eff, new_eff, increased = apply_pricing(
+            menu_idx, ref_base, ref_revised,
+            "auto match" if m.get("auto") else "user confirmed",
+            ref_item_name)
+        increase_flags[r_idx] = increased
 
         if addon_indices and menu_idx in addon_indices:
             for addon_idx in addon_indices[menu_idx]:
@@ -539,12 +561,14 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
             new_price  = safe_price(df.at[menu_idx, "Price"])
             new_markup = safe_price(df.at[menu_idx, "Markup Price"]) if "Markup Price" in df.columns else None
             eff_price  = effective_current_price(new_price, new_markup)
+            price_increased = increase_flags.get(r_idx, False)
             summary_rows.append({
                 "Ref Item Name":           ref_name,
                 "Ref Base Price":          ref_base_val,
                 "Matched Menu Item":       menu_item,
                 "Effective Current Price": _fmt(eff_price),
                 "Status":                  "Matched",
+                "⚠ Price Increased":      "YES — REVIEW" if price_increased else "",
             })
         else:
             summary_rows.append({
@@ -553,6 +577,7 @@ def process_matches(menu_df, ref_df, confirmed_matches, mode="slash", addon_indi
                 "Matched Menu Item":       "",
                 "Effective Current Price": "",
                 "Status":                  "Not matched — update manually",
+                "⚠ Price Increased":      "",
             })
 
     return df, pd.DataFrame(summary_rows), detail_df
