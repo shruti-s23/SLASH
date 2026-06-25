@@ -2,13 +2,17 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
+import re
 import sys
 from datetime import datetime
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-from decision_engine import match_items, process_matches, find_addon_rows, strip_ids
+from decision_engine import (
+    match_items, process_matches, find_addon_rows, strip_ids,
+    detect_existing_slashing_on_rows, effective_current_price,
+)
 
 st.set_page_config(page_title="Price Revision", layout="wide")
 
@@ -42,10 +46,11 @@ def fmt_price(val):
     return str(int(f)) if f == int(f) else str(round(f, 2))
 
 
-def normalise_price_col(series: pd.Series) -> pd.Series:
+def normalise_price_col(series):
     return pd.to_numeric(series.apply(to_float), errors="coerce").astype("float64")
 
-def save_df(df: pd.DataFrame) -> None:
+
+def save_df(df):
     df = df.copy()
     for col in ["Price", "Markup Price"]:
         if col in df.columns:
@@ -57,21 +62,21 @@ def save_df(df: pd.DataFrame) -> None:
                 v = df.at[idx, col]
                 if isinstance(v, float) and not np.isnan(v):
                     backup.append((int(idx), col, float(v)))
-    st.session_state.menu_df = df
+    st.session_state.menu_df      = df
     st.session_state._price_backup = backup
 
 
-def load_df() -> pd.DataFrame:
+def load_df():
     df = st.session_state.menu_df.copy()
     for col in ["Price", "Markup Price"]:
         if col in df.columns:
             df[col] = normalise_price_col(df[col])
-
     backup = st.session_state.get("_price_backup", [])
     for (idx, col, val) in backup:
         if idx in df.index and col in df.columns:
             df.at[idx, col] = float(val)
     return df
+
 
 def detect_freeze_index(df):
     for i in df.index:
@@ -100,12 +105,9 @@ def section(title):
     st.markdown("---")
 
 
-def validate_ref_csv(df: pd.DataFrame) -> tuple[bool, str]:
+def validate_ref_csv(df):
     cols_lower = [c.strip().lower() for c in df.columns]
-    has_item = any(
-        "item" in c and "group" not in c and "addon" not in c
-        for c in cols_lower
-    )
+    has_item    = any("item" in c and "group" not in c and "addon" not in c for c in cols_lower)
     has_revised = any("revised" in c for c in cols_lower)
     if not has_item:
         return False, "Missing an 'Item Name' column."
@@ -114,44 +116,57 @@ def validate_ref_csv(df: pd.DataFrame) -> tuple[bool, str]:
     return True, ""
 
 
-def render_preview(label: str):
-    df = st.session_state.get(f"_preview_df_{label}")
-    if df is None:
-        return
-    display = df.copy()
+def _parse_hms(raw_str):
+    raw_str = raw_str.strip()
+    matched = re.match(r"^([01]?\d|2[0-3]):([0-5]\d):([0-5]\d)$", raw_str)
+    if not matched:
+        return None
+    h, mi, se = matched.groups()
+    return f"{int(h):02d}:{mi}:{se}"
+
+
+def store_preview(label, df):
+    snap = df.copy()
     for col in ["Price", "Markup Price"]:
-        if col in display.columns:
-            display[col] = display[col].apply(fmt_price)
-    display = display.fillna("")
-    n = len(display)
+        if col in snap.columns:
+            snap[col] = snap[col].apply(fmt_price)
+    snap = snap.fillna("")
+    st.session_state[f"_preview_df_{label}"]  = snap
+    st.session_state[f"_preview_exp_{label}"] = False
+
+
+def render_preview(label):
+    snap = st.session_state.get(f"_preview_df_{label}")
+    if snap is None:
+        return
+    n        = len(snap)
     expanded = st.session_state.get(f"_preview_exp_{label}", False)
-    st.dataframe(display if expanded else display.head(8), use_container_width=True)
+    st.dataframe(snap if expanded else snap.head(8), use_container_width=True)
     if n > 8:
-        lbl = f"▲ Collapse" if expanded else f"▼ Show all {n} rows"
+        lbl = "▲ Collapse" if expanded else f"▼ Show all {n} rows"
         if st.button(lbl, key=f"_prev_btn_{label}"):
             st.session_state[f"_preview_exp_{label}"] = not expanded
             st.rerun()
 
 
-def store_preview(label: str, df: pd.DataFrame):
-    st.session_state[f"_preview_df_{label}"] = df.copy()
-
 DEFAULTS = {
     "menu_df": None, "freeze_idx": 0, "original_name": None,
-    "last_file_name": None, "_price_backup": {},
+    "last_file_name": None, "_price_backup": [],
     "ref_df": None, "last_ref_name": None,
-    "auto_matches": [], "hitl_queue": [], "hitl_cursor": 0,
-    "hitl_history": [],
+    "auto_matches": [], "hitl_queue": [], "hitl_cursor": 0, "hitl_history": [],
     "confirmed_matches": [], "addon_indices": {},
     "audit_log": None, "slash_snapshot": None,
     "slash_removal_done": False, "remove_slash_only_done": False,
     "flat_discount_done": False, "ref_apply_done": False,
     "ref_apply_count": 0, "last_ref_mode": None,
     "ref_uploader_key": 0, "matching_ran": False,
+    "slash_base_strategy": None, "strategy_confirmed": False,
+    "match_preview_snapshot": None,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
 
 st.title("Price Revision")
 st.markdown(" ")
@@ -189,38 +204,41 @@ if menu_file is not None and menu_file.name != st.session_state.last_file_name:
 
     freeze_idx_new = detect_freeze_index(raw)
 
-    snap_p = pd.to_numeric(raw["Price"], errors="coerce")
-    snap_m = pd.to_numeric(raw.get("Markup Price", pd.Series(dtype=float)), errors="coerce")
+    snap_p    = pd.to_numeric(raw["Price"], errors="coerce")
+    snap_m    = pd.to_numeric(raw.get("Markup Price", pd.Series(dtype=float)), errors="coerce")
     snap_mask = snap_p.notna() & snap_m.notna() & (snap_m > snap_p)
     snap_mask.iloc[:freeze_idx_new] = False
     if snap_mask.sum() > 0:
         snap_rows = raw[snap_mask].copy()
-        snap_rows["_p"] = snap_p[snap_mask]
-        snap_rows["_m"] = snap_m[snap_mask]
+        snap_rows["_p"]        = snap_p[snap_mask]
+        snap_rows["_m"]        = snap_m[snap_mask]
         snap_rows["Slashing %"] = ((1 - snap_rows["_p"] / snap_rows["_m"]) * 100).round(2).astype(str) + "%"
         snap_rows = snap_rows.drop(columns=["_p", "_m"])
         st.session_state.slash_snapshot = {
-            "count": int(snap_mask.sum()),
-            "sample_price": float(snap_p[snap_mask].iloc[0]),
+            "count":         int(snap_mask.sum()),
+            "sample_price":  float(snap_p[snap_mask].iloc[0]),
             "sample_markup": float(snap_m[snap_mask].iloc[0]),
-            "rows": snap_rows,
+            "rows":          snap_rows,
         }
     else:
         st.session_state.slash_snapshot = None
 
     for k in ["auto_matches", "hitl_queue", "confirmed_matches", "addon_indices", "hitl_history"]:
         st.session_state[k] = [] if k != "addon_indices" else {}
-    st.session_state.hitl_cursor = 0
-    st.session_state.audit_log = None
-    st.session_state.ref_df = None
-    st.session_state.last_ref_name = None
+    st.session_state.hitl_cursor     = 0
+    st.session_state.audit_log       = None
+    st.session_state.ref_df          = None
+    st.session_state.last_ref_name   = None
+    st.session_state.slash_base_strategy = None
+    st.session_state.strategy_confirmed  = False
+    st.session_state.match_preview_snapshot = None
     for k in ["slash_removal_done", "remove_slash_only_done", "flat_discount_done",
               "ref_apply_done", "matching_ran"]:
         st.session_state[k] = False
     st.session_state.ref_apply_count = 0
-    st.session_state.freeze_idx = freeze_idx_new
-    st.session_state.original_name = os.path.splitext(menu_file.name)[0]
-    st.session_state.last_file_name = menu_file.name
+    st.session_state.freeze_idx      = freeze_idx_new
+    st.session_state.original_name   = os.path.splitext(menu_file.name)[0]
+    st.session_state.last_file_name  = menu_file.name
 
     save_df(raw)
     store_preview("initial", load_df().iloc[freeze_idx_new:])
@@ -229,11 +247,11 @@ if st.session_state.menu_df is None:
     st.info("Upload a menu CSV to get started.")
     st.stop()
 
-freeze_idx = st.session_state.freeze_idx
-df_view = load_df()
+freeze_idx   = st.session_state.freeze_idx
+df_view      = load_df()
 working_view = df_view.iloc[freeze_idx:]
 available_types = sorted(working_view["Brand SKU ID Type"].dropna().unique().tolist())
-item_count = working_view[working_view["Brand SKU ID Type"] == "Item"]["Item"].nunique()
+item_count      = working_view[working_view["Brand SKU ID Type"] == "Item"]["Item"].nunique()
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Working Rows", len(working_view))
@@ -241,6 +259,7 @@ c2.metric("Unique Items", item_count)
 c3.metric("Row Types", " · ".join(available_types) if available_types else "N/A")
 render_preview("initial")
 st.markdown(" ")
+
 
 section("② Slashing Detection")
 snap = st.session_state.slash_snapshot
@@ -258,8 +277,8 @@ else:
         st.warning(f"Existing Discount on {snap['count']} rows.")
 
     with st.expander("View slashed rows"):
-        show_cols = [c for c in ["Category", "Subcategory", "Item", "Price", "Markup Price", "Slashing %"]
-                     if c in snap["rows"].columns]
+        show_cols   = [c for c in ["Category", "Subcategory", "Item", "Price", "Markup Price", "Slashing %"]
+                       if c in snap["rows"].columns]
         snap_display = snap["rows"][show_cols].reset_index(drop=True).copy()
         for col in ["Price", "Markup Price"]:
             if col in snap_display.columns:
@@ -274,18 +293,18 @@ else:
         )
         if remove_choice == "Yes — restore original prices":
             if st.button("Confirm removal", key="confirm_removal_btn"):
-                df_rm = load_df()
+                df_rm         = load_df()
                 update_col_rm = find_update_col(df_rm)
-                slashed = [
+                slashed       = [
                     i for i in df_rm.index[freeze_idx:]
                     if pd.notna(df_rm.at[i, "Price"])
                     and pd.notna(df_rm.at[i, "Markup Price"])
                     and df_rm.at[i, "Markup Price"] > df_rm.at[i, "Price"]
                 ]
                 for i in slashed:
-                    df_rm.at[i, "Price"] = df_rm.at[i, "Markup Price"]
+                    df_rm.at[i, "Price"]        = df_rm.at[i, "Markup Price"]
                     df_rm.at[i, "Markup Price"] = np.nan
-                    df_rm.at[i, update_col_rm] = "Yes"
+                    df_rm.at[i, update_col_rm]  = "Yes"
                 save_df(df_rm)
                 st.session_state.slash_removal_done = True
                 store_preview("post-slash-removal", load_df().iloc[freeze_idx:])
@@ -296,6 +315,7 @@ else:
 
 st.markdown(" ")
 
+
 section("③ Operation")
 operation = st.selectbox(
     "What would you like to do?",
@@ -303,6 +323,7 @@ operation = st.selectbox(
     key="operation_select",
 )
 st.markdown(" ")
+
 
 if operation == "Apply flat % discount":
 
@@ -329,19 +350,19 @@ if operation == "Apply flat % discount":
         st.markdown("**Apply to**")
         df_scope = load_df().iloc[freeze_idx:]
 
-        all_cats_raw = sorted(df_scope["Category"].dropna().unique().tolist())
-        cat_map = {clean_label(c): c for c in all_cats_raw}
+        all_cats_raw     = sorted(df_scope["Category"].dropna().unique().tolist())
+        cat_map          = {clean_label(c): c for c in all_cats_raw}
         sel_cats_display = st.multiselect("Categories (blank = all)", options=list(cat_map.keys()),
                                           default=[], key="sel_cats_ms", placeholder="All categories")
-        sel_cats_raw = [cat_map[c] for c in sel_cats_display] if sel_cats_display else all_cats_raw
+        sel_cats_raw     = [cat_map[c] for c in sel_cats_display] if sel_cats_display else all_cats_raw
 
         sel_subcats_raw, sel_items_raw = [], []
         subcats_in_scope = sorted(df_scope[df_scope["Category"].isin(sel_cats_raw)]["Subcategory"].dropna().unique())
         if subcats_in_scope:
-            sub_map = {clean_label(s): s for s in subcats_in_scope}
+            sub_map          = {clean_label(s): s for s in subcats_in_scope}
             sel_subs_display = st.multiselect("Subcategories (blank = all)", options=list(sub_map.keys()),
                                               default=[], key="sel_subs_ms", placeholder="All subcategories")
-            sel_subcats_raw = [sub_map[s] for s in sel_subs_display] if sel_subs_display else list(subcats_in_scope)
+            sel_subcats_raw  = [sub_map[s] for s in sel_subs_display] if sel_subs_display else list(subcats_in_scope)
 
             items_in_scope = sorted(df_scope[
                 df_scope["Category"].isin(sel_cats_raw) &
@@ -349,17 +370,18 @@ if operation == "Apply flat % discount":
                 (df_scope["Brand SKU ID Type"] == "Item")
             ]["Item"].dropna().unique())
             if items_in_scope:
-                item_map = {clean_label(i): i for i in items_in_scope}
+                item_map          = {clean_label(i): i for i in items_in_scope}
                 sel_items_display = st.multiselect("Items (blank = all)", options=list(item_map.keys()),
                                                    default=[], key="sel_items_ms", placeholder="All items")
-                sel_items_raw = [item_map[i] for i in sel_items_display] if sel_items_display else list(items_in_scope)
+                sel_items_raw     = [item_map[i] for i in sel_items_display] if sel_items_display else list(items_in_scope)
 
     st.markdown(" ")
     if st.button("Apply Discount", key="apply_flat_btn", type="primary"):
-        df_apply = load_df()
+        df_apply   = load_df()
         update_col = find_update_col(df_apply)
-        factor = (100 - discount) / 100
-        applied = skipped_min = 0
+        factor     = (100 - discount) / 100
+        applied    = 0
+        skipped_min = 0
 
         for i in df_apply.index[freeze_idx:]:
             sku_type = str(df_apply.at[i, "Brand SKU ID Type"] or "").strip()
@@ -372,16 +394,16 @@ if operation == "Apply flat % discount":
             if sel_items_raw and str(df_apply.at[i, "Item"] or "").strip() not in sel_items_raw:
                 continue
 
-            price_val = df_apply.at[i, "Price"]
-            if not isinstance(price_val, (int, float)) or np.isnan(price_val) or price_val <= 0:
+            price_val = to_float(df_apply.at[i, "Price"])
+            if np.isnan(price_val) or price_val <= 0:
                 continue
             if min_price > 0 and price_val <= min_price:
                 skipped_min += 1
                 continue
 
             df_apply.at[i, "Markup Price"] = price_val
-            df_apply.at[i, "Price"] = round(price_val * factor)
-            df_apply.at[i, update_col] = "Yes"
+            df_apply.at[i, "Price"]        = round(price_val * factor)
+            df_apply.at[i, update_col]     = "Yes"
             applied += 1
 
         save_df(df_apply)
@@ -419,12 +441,16 @@ elif operation == "Use reference CSV":
     def _reset_ref_state():
         for k in ["auto_matches", "hitl_queue", "confirmed_matches", "addon_indices", "hitl_history"]:
             st.session_state[k] = [] if k != "addon_indices" else {}
-        st.session_state.hitl_cursor = 0
-        for k in ["ref_apply_done", "matching_ran"]:
-            st.session_state[k] = False
+        st.session_state.hitl_cursor    = 0
+        st.session_state.ref_apply_done = False
+        st.session_state.matching_ran   = False
         st.session_state.ref_apply_count = 0
-        st.session_state.ref_df = None
-        st.session_state.last_ref_name = None
+        st.session_state.ref_df         = None
+        st.session_state.last_ref_name  = None
+        st.session_state.slash_base_strategy = None
+        st.session_state.strategy_confirmed  = False
+        st.session_state.match_preview_snapshot = None
+        st.session_state.audit_log = None
         for k in ["_preview_df_post-ref-update", "_preview_exp_post-ref-update"]:
             st.session_state.pop(k, None)
 
@@ -449,16 +475,16 @@ elif operation == "Use reference CSV":
 
             valid, err_msg = validate_ref_csv(ref_df_raw)
             if not valid:
-                st.error(f"Invalid reference CSV — {err_msg} Download the template above for the correct format.")
+                st.error(f"Invalid reference CSV — {err_msg}")
                 st.stop()
 
             _reset_ref_state()
-            st.session_state.ref_df = ref_df_raw.copy()
+            st.session_state.ref_df        = ref_df_raw.copy()
             st.session_state.last_ref_name = ref_file.name
 
         ref_df = st.session_state.ref_df.copy()
 
-        n_ref = len(ref_df)
+        n_ref   = len(ref_df)
         ref_exp = st.session_state.get("_ref_preview_exp", False)
         with st.expander("Reference CSV preview", expanded=False):
             st.dataframe(ref_df if ref_exp else ref_df.head(8), use_container_width=True)
@@ -473,13 +499,73 @@ elif operation == "Use reference CSV":
         if st.button("Run Matching", key="run_match_btn", type="primary"):
             menu_working = load_df().iloc[freeze_idx:].copy().reset_index(drop=True)
             auto_m, hitl_q = match_items(menu_working, ref_df)
-            st.session_state.auto_matches = auto_m
-            st.session_state.hitl_queue = hitl_q
-            st.session_state.hitl_cursor = 0
-            st.session_state.hitl_history = []
+            st.session_state.auto_matches      = auto_m
+            st.session_state.hitl_queue        = hitl_q
+            st.session_state.hitl_cursor       = 0
+            st.session_state.hitl_history      = []
             st.session_state.confirmed_matches = list(auto_m)
-            st.session_state.addon_indices = {}
-            st.session_state.matching_ran = True
+            st.session_state.addon_indices     = {}
+            st.session_state.matching_ran      = True
+            st.session_state.slash_base_strategy = None
+            st.session_state.strategy_confirmed  = False
+
+            ref_base_col  = next((c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()), None)
+            ref_price_col = next((c for c in ref_df.columns if "revised" in c.lower()), None)
+
+            snap_rows = []
+            menu_snap = load_df().iloc[freeze_idx:].reset_index(drop=True)
+            for m_entry in auto_m:
+                try:
+                    menu_row    = menu_snap.iloc[m_entry["menu_index"]]
+                    raw_price   = to_float(menu_row.get("Price", ""))
+                    raw_markup  = to_float(menu_row.get("Markup Price", ""))
+                    eff_vals    = [v for v in (raw_price, raw_markup) if not np.isnan(v)]
+                    eff_price   = fmt_price(max(eff_vals)) if eff_vals else ""
+                    menu_p_str  = fmt_price(raw_price)
+                    menu_mk_str = fmt_price(raw_markup)
+                except Exception:
+                    eff_price = menu_p_str = menu_mk_str = ""
+
+                ref_base_str    = ""
+                ref_revised_str = ""
+                ref_revised_val = None
+                if ref_base_col:
+                    try:
+                        ref_base_str = str(ref_df.iloc[m_entry["ref_index"]][ref_base_col]).strip()
+                        if ref_base_str in ("nan", "None", ""):
+                            ref_base_str = ""
+                    except Exception:
+                        pass
+                if ref_price_col:
+                    try:
+                        ref_revised_str = str(ref_df.iloc[m_entry["ref_index"]][ref_price_col]).strip()
+                        if ref_revised_str in ("nan", "None", ""):
+                            ref_revised_str = ""
+                        ref_revised_val = to_float(ref_revised_str)
+                        if np.isnan(ref_revised_val):
+                            ref_revised_val = None
+                    except Exception:
+                        pass
+
+                eff_price_val = to_float(eff_price) if eff_price else None
+                will_increase = (
+                    eff_price_val is not None and ref_revised_val is not None
+                    and ref_revised_val > eff_price_val
+                )
+
+                snap_rows.append({
+                    "Ref Item Name":            m_entry["item"],
+                    "Ref Base Price":           ref_base_str,
+                    "Ref Revised Price":        ref_revised_str,
+                    "Matched Menu Item":        clean_label(str(menu_row.get("Item", ""))),
+                    "Menu Price":               menu_p_str,
+                    "Menu Markup Price":        menu_mk_str,
+                    "Effective Current Price":  eff_price,
+                    "SKU Type":                 m_entry.get("menu_sku_type", ""),
+                    "⚠ Price Increase":        "YES — REVIEW" if will_increase else "",
+                })
+
+            st.session_state.match_preview_snapshot = snap_rows
             st.rerun()
 
         if st.session_state.matching_ran:
@@ -490,151 +576,108 @@ elif operation == "Use reference CSV":
             col_b.metric("Needs review", n_hitl)
             st.markdown(" ")
 
-            if n_auto > 0:
-                menu_prev      = load_df().iloc[freeze_idx:].reset_index(drop=True)
-                ref_price_col  = next((c for c in ref_df.columns if "revised" in c.lower()), None)
-                ref_base_col   = next((c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()), None)
-
-                auto_rows = []
-                increase_count = 0
-                for m in st.session_state.auto_matches:
-                    try:
-                        menu_row   = menu_prev.iloc[m["menu_index"]]
-                        menu_item  = clean_label(str(menu_row.get("Item", "")))
-                        raw_price  = to_float(menu_row.get("Price",        ""))
-                        raw_markup = to_float(menu_row.get("Markup Price", ""))
-                        eff_vals   = [v for v in (raw_price, raw_markup) if not np.isnan(v)]
-                        eff_price_val = max(eff_vals) if eff_vals else None
-                        eff_price  = fmt_price(eff_price_val) if eff_price_val is not None else ""
-                    except Exception:
-                        menu_item = "—"
-                        eff_price_val = None
-                        eff_price = ""
-
-                    ref_base_display = ""
-                    if ref_base_col:
-                        try:
-                            ref_base_display = str(ref_df.iloc[m["ref_index"]][ref_base_col]).strip()
-                        except Exception:
-                            pass
-
-                    ref_revised_display = ""
-                    ref_revised_val = None
-                    if ref_price_col:
-                        try:
-                            ref_revised_display = str(ref_df.iloc[m["ref_index"]][ref_price_col]).strip()
-                            ref_revised_val = to_float(ref_revised_display)
-                            if np.isnan(ref_revised_val):
-                                ref_revised_val = None
-                        except Exception:
-                            pass
-
-                    will_increase = (
-                        eff_price_val is not None and ref_revised_val is not None
-                        and ref_revised_val > eff_price_val
-                    )
-                    if will_increase:
-                        increase_count += 1
-
-                    auto_rows.append({
-                        "Ref Item Name":           m["item"],
-                        "Ref Base Price":          ref_base_display,
-                        "Ref Revised Price":       ref_revised_display,
-                        "Matched Menu Item":       menu_item,
-                        "Effective Current Price": eff_price,
-                        "SKU Type":                m.get("menu_sku_type", ""),
-                        "⚠ Price Increase":       "YES — REVIEW" if will_increase else "",
-                    })
+            snap_rows = st.session_state.get("match_preview_snapshot") or []
+            if snap_rows:
+                snap_df        = pd.DataFrame(snap_rows)
+                increase_count = int((snap_df["⚠ Price Increase"] == "YES — REVIEW").sum())
 
                 if increase_count > 0:
                     st.error(
-                        f"⚠ {increase_count} auto-matched row(s) would INCREASE in price "
-                        f"compared to the current menu price. Review before applying."
+                        f"⚠ {increase_count} auto-matched row(s) would INCREASE in price. "
+                        f"Review before applying."
                     )
 
-                with st.expander(f"View {n_auto} auto-matched rows", expanded=increase_count > 0):
-                    auto_df = pd.DataFrame(auto_rows)
+                with st.expander(f"Auto-match preview ({n_auto} rows)", expanded=increase_count > 0):
                     if increase_count > 0:
                         def _hl(row):
-                            return [
-                                "background-color: #ffcccc; font-weight: bold;" if row["⚠ Price Increase"] else ""
-                                for _ in row
-                            ]
-                        st.dataframe(auto_df.style.apply(_hl, axis=1), use_container_width=True)
+                            flagged = row.get("⚠ Price Increase", "") == "YES — REVIEW"
+                            colour  = "background-color: #fff3cd; color: #856404;" if flagged else ""
+                            return [colour] * len(row)
+                        st.dataframe(snap_df.style.apply(_hl, axis=1), use_container_width=True)
                     else:
-                        st.dataframe(auto_df, use_container_width=True)
+                        st.dataframe(snap_df, use_container_width=True)
 
             queue  = st.session_state.hitl_queue
             cursor = st.session_state.hitl_cursor
 
             if cursor < len(queue):
-                item = queue[cursor]
+                item_q = queue[cursor]
                 with st.expander(f"Review {cursor + 1} of {len(queue)}", expanded=True):
                     st.progress(cursor / len(queue), text=f"{cursor + 1} / {len(queue)}")
                     st.markdown(" ")
 
-                    badge = "🔖 Addon" if item.get("is_addon") else "🍽 Item"
-                    ref_price_col_hitl = next((c for c in ref_df.columns if "revised" in c.lower()), None)
-                    ref_price_display = ""
+                    badge               = "🔖 Addon" if item_q.get("is_addon") else "🍽 Item"
+                    ref_price_col_hitl  = next((c for c in ref_df.columns if "revised" in c.lower()), None)
+                    ref_base_col_hitl   = next((c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()), None)
+                    ref_price_display   = ""
+                    ref_base_display_h  = ""
                     if ref_price_col_hitl:
                         try:
-                            ref_price_display = str(ref_df.iloc[item["ref_index"]][ref_price_col_hitl]).strip()
+                            v = str(ref_df.iloc[item_q["ref_index"]][ref_price_col_hitl]).strip()
+                            ref_price_display = v if v not in ("nan", "None", "") else ""
                         except Exception:
                             pass
-                    price_note = f" — ₹{ref_price_display}" if ref_price_display else ""
-                    st.markdown(f"**{badge}** `{item['ref_item']}`{price_note}")
+                    if ref_base_col_hitl:
+                        try:
+                            v = str(ref_df.iloc[item_q["ref_index"]][ref_base_col_hitl]).strip()
+                            ref_base_display_h = v if v not in ("nan", "None", "") else ""
+                        except Exception:
+                            pass
+
+                    price_note = ""
+                    if ref_base_display_h:
+                        price_note = f" — Base ₹{ref_base_display_h}"
+                    if ref_price_display:
+                        price_note += f"  Revised ₹{ref_price_display}"
+                    st.markdown(f"**{badge}** `{item_q['ref_item']}`{price_note}")
 
                     meta = []
-                    if item.get("ref_cat"):     meta.append(f"Cat: `{item['ref_cat']}`")
-                    if item.get("ref_subcat"):  meta.append(f"Sub: `{item['ref_subcat']}`")
-                    if item.get("ref_variant"): meta.append(f"Variant: `{item['ref_variant']}`")
+                    if item_q.get("ref_cat"):     meta.append(f"Cat: `{item_q['ref_cat']}`")
+                    if item_q.get("ref_subcat"):  meta.append(f"Sub: `{item_q['ref_subcat']}`")
+                    if item_q.get("ref_variant"): meta.append(f"Variant: `{item_q['ref_variant']}`")
                     if meta:
                         st.markdown("  ·  ".join(meta))
 
-                    candidates = item.get("candidates", [])
+                    candidates = item_q.get("candidates", [])
                     if not candidates:
                         st.info("No candidates found.")
-                        col_skip, col_undo = st.columns([1, 1])
-                        if col_skip.button("Skip →", key=f"skip_nc_{cursor}"):
+                        if st.button("Skip →", key=f"skip_nc_{cursor}"):
                             st.session_state.hitl_history.append(("skip", cursor, None))
                             st.session_state.hitl_cursor += 1
                             st.rerun()
                     else:
-                        st.caption("Candidates ranked by confidence — top is most likely.")
+                        st.caption("All candidates ranked by confidence.")
 
-                        cand_table_rows = []
-                        for c in candidates:
-                            cand_table_rows.append({
-                                "Brand SKU Type":    c.get("menu_sku_type", ""),
-                                "Item Name":         c.get("menu_item", ""),
-                                "Variant Group L1":  c.get("menu_variant_group_l1", ""),
-                                "Variants L1":       c.get("menu_variant_l1", ""),
-                                "Description":       c.get("menu_description", ""),
-                                "Price (₹)":         c.get("menu_price", ""),
-                                "Category":          c.get("menu_cat", ""),
-                                "Subcategory":       c.get("menu_subcat", ""),
+                        cand_rows = []
+                        for c_item in candidates:
+                            cand_rows.append({
+                                "Brand SKU Type":   c_item.get("menu_sku_type", ""),
+                                "Item Name":        c_item.get("menu_item", ""),
+                                "Variant Group L1": c_item.get("menu_variant_group_l1", ""),
+                                "Variants L1":      c_item.get("menu_variant_l1", ""),
+                                "Description":      c_item.get("menu_description", ""),
+                                "Menu Price":       c_item.get("menu_price", ""),
+                                "Menu Markup":      c_item.get("menu_markup", ""),
+                                "Category":         c_item.get("menu_cat", ""),
+                                "Subcategory":      c_item.get("menu_subcat", ""),
                             })
-                        st.dataframe(
-                            pd.DataFrame(cand_table_rows),
-                            use_container_width=True,
-                            hide_index=False,
-                        )
-                        st.caption("Select by row number below (0 = first row)")
+                        st.dataframe(pd.DataFrame(cand_rows), use_container_width=True, hide_index=False)
+                        st.caption("Select by row number (0 = first)")
 
                         options = ["— Skip this item —"] + [
                             "  ·  ".join(filter(None, [
-                                c["menu_item"]    if c.get("menu_item")    not in ("", "nan", None) else None,
-                                f"[{c['menu_sku_type']}]" if c.get("menu_sku_type") not in ("", "nan", None) else None,
-                                c["menu_variant_group_l1"] if c.get("menu_variant_group_l1") not in ("", "nan", None) else None,
-                                c["menu_variant_l1"]       if c.get("menu_variant_l1")       not in ("", "nan", None) else None,
-                                f"₹{c['menu_price']}" if c.get("menu_price") not in ("", "nan", None) else None,
+                                c_item.get("menu_item") or None,
+                                f"[{c_item['menu_sku_type']}]" if c_item.get("menu_sku_type") else None,
+                                c_item.get("menu_variant_group_l1") or None,
+                                c_item.get("menu_variant_l1") or None,
+                                f"₹{c_item['menu_price']}" if c_item.get("menu_price") else None,
                             ]))
-                            for c in candidates
+                            for c_item in candidates
                         ]
                         choice = st.radio("Select correct match:", options, key=f"hitl_{cursor}")
 
-                        is_addon_item = item.get("is_addon", False)
-                        apply_all = False
+                        is_addon_item = item_q.get("is_addon", False)
+                        apply_all     = False
                         if is_addon_item:
                             apply_all = st.checkbox(
                                 "Apply same pricing wherever this appears as an addon",
@@ -644,31 +687,30 @@ elif operation == "Use reference CSV":
 
                         if col_confirm.button("Confirm ✓", key=f"confirm_{cursor}", type="primary"):
                             if choice != "— Skip this item —":
-                                ci = options.index(choice) - 1
-                                c  = candidates[ci]
+                                ci    = options.index(choice) - 1
+                                c_sel = candidates[ci]
                                 entry = {
-                                    "ref_index":  item["ref_index"],
-                                    "menu_index": c["menu_index"],
-                                    "item":       item["ref_item"],
+                                    "ref_index":  item_q["ref_index"],
+                                    "menu_index": c_sel["menu_index"],
+                                    "item":       item_q["ref_item"],
                                     "auto":       False,
-                                    "is_addon":   item.get("is_addon", False),
+                                    "is_addon":   item_q.get("is_addon", False),
                                 }
                                 st.session_state.confirmed_matches.append(entry)
                                 st.session_state.hitl_history.append(("confirm", cursor, entry))
                                 if apply_all:
-                                    norm_name = item["ref_item"].lower().strip()
+                                    norm_name = item_q["ref_item"].lower().strip()
                                     for fut in queue[cursor + 1:]:
                                         if fut["ref_item"].lower().strip() == norm_name:
                                             for fc in fut.get("candidates", []):
-                                                if fc["menu_item"].lower().strip() == c["menu_item"].lower().strip():
-                                                    extra = {
+                                                if fc["menu_item"].lower().strip() == c_sel["menu_item"].lower().strip():
+                                                    st.session_state.confirmed_matches.append({
                                                         "ref_index":  fut["ref_index"],
                                                         "menu_index": fc["menu_index"],
                                                         "item":       fut["ref_item"],
                                                         "auto":       False,
                                                         "is_addon":   fut.get("is_addon", False),
-                                                    }
-                                                    st.session_state.confirmed_matches.append(extra)
+                                                    })
                                                     break
                             else:
                                 st.session_state.hitl_history.append(("skip", cursor, None))
@@ -685,7 +727,7 @@ elif operation == "Use reference CSV":
                             last_action, last_cursor, last_entry = history.pop()
                             if last_action == "confirm" and last_entry and last_entry in st.session_state.confirmed_matches:
                                 st.session_state.confirmed_matches.remove(last_entry)
-                            st.session_state.hitl_cursor = last_cursor
+                            st.session_state.hitl_cursor  = last_cursor
                             st.session_state.hitl_history = history
                             st.rerun()
 
@@ -697,54 +739,156 @@ elif operation == "Use reference CSV":
 
                 st.markdown(" ")
 
-                menu_full = load_df()
+                menu_full        = load_df()
                 addon_col_exists = any(c.strip().lower() == "addon" for c in menu_full.columns)
                 if addon_col_exists and not st.session_state.ref_apply_done:
                     items_with_addons = {}
-                    for m in st.session_state.confirmed_matches:
-                        if not m.get("is_addon"):
-                            addon_idx_list = find_addon_rows(menu_full, m["item"])
-                            if addon_idx_list:
-                                items_with_addons[m["menu_index"]] = (m["item"], addon_idx_list)
+                    for m_entry in st.session_state.confirmed_matches:
+                        if not m_entry.get("is_addon"):
+                            working_idx_list = menu_full.iloc[freeze_idx:].index.tolist()
+                            try:
+                                actual_idx = working_idx_list[m_entry["menu_index"]]
+                                addon_idx_list = find_addon_rows(menu_full, m_entry["item"])
+                                if addon_idx_list:
+                                    items_with_addons[actual_idx] = (m_entry["item"], addon_idx_list)
+                            except Exception:
+                                pass
                     if items_with_addons:
-                        st.info(f"{len(items_with_addons)} matched item(s) also appear as addons. Apply same pricing?")
-                        apply_to_addons = st.radio("Apply to addon rows?",
-                                                   ["No", "Yes — apply to all addon occurrences"],
-                                                   key="addon_propagation_radio", horizontal=True)
+                        st.info(f"{len(items_with_addons)} matched item(s) also appear as addons.")
+                        apply_to_addons = st.radio(
+                            "Apply same pricing to addon rows?",
+                            ["No", "Yes — apply to all addon occurrences"],
+                            key="addon_propagation_radio", horizontal=True)
                         st.session_state.addon_indices = {
                             menu_idx: addon_list
                             for menu_idx, (_, addon_list) in items_with_addons.items()
                         } if apply_to_addons.startswith("Yes") else {}
 
-                if not st.session_state.ref_apply_done:
-                    if st.button("Apply All Confirmed Matches", key="apply_confirmed_btn", type="primary"):
-                        df_apply = load_df()
-                        working_index_list = df_apply.iloc[freeze_idx:].index.tolist()
-                        confirmed_mapped = []
-                        for m in st.session_state.confirmed_matches:
+                if mode == "slash" and not st.session_state.ref_apply_done:
+                    df_check          = load_df()
+                    working_idx_list  = df_check.iloc[freeze_idx:].index.tolist()
+                    confirmed_indices = []
+                    for m_entry in st.session_state.confirmed_matches:
+                        try:
+                            confirmed_indices.append(working_idx_list[m_entry["menu_index"]])
+                        except Exception:
+                            pass
+
+                    slashed_confirmed = detect_existing_slashing_on_rows(df_check, confirmed_indices)
+
+                    ref_base_col_check = next(
+                        (c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()), None)
+                    ref_has_base = False
+                    if ref_base_col_check:
+                        for m_entry in st.session_state.confirmed_matches:
                             try:
-                                actual_idx = working_index_list[m["menu_index"]]
-                                confirmed_mapped.append({**m, "menu_index": actual_idx})
+                                v = str(ref_df.iloc[m_entry["ref_index"]][ref_base_col_check]).strip()
+                                if v not in ("", "nan", "None"):
+                                    ref_has_base = True
+                                    break
+                            except Exception:
+                                pass
+
+                    if slashed_confirmed or ref_has_base:
+                        st.markdown("#### Base Price Strategy")
+                        st.info(
+                            "Some matched rows have existing slashing or the reference CSV contains "
+                            "Base Price values. Choose how to determine the final Markup Price."
+                        )
+
+                        if slashed_confirmed or ref_has_base:
+                            preview_rows = []
+                            ref_price_col_s = next((c for c in ref_df.columns if "revised" in c.lower()), None)
+                            for m_entry in st.session_state.confirmed_matches[:10]:
+                                try:
+                                    actual_idx = working_idx_list[m_entry["menu_index"]]
+                                    menu_p  = to_float(df_check.at[actual_idx, "Price"])
+                                    menu_mk = to_float(df_check.at[actual_idx, "Markup Price"])
+                                    eff     = effective_current_price(menu_p, menu_mk)
+                                    ref_b_v = ""
+                                    ref_r_v = ""
+                                    if ref_base_col_check:
+                                        rb = str(ref_df.iloc[m_entry["ref_index"]][ref_base_col_check]).strip()
+                                        ref_b_v = rb if rb not in ("", "nan", "None") else ""
+                                    if ref_price_col_s:
+                                        rr = str(ref_df.iloc[m_entry["ref_index"]][ref_price_col_s]).strip()
+                                        ref_r_v = rr if rr not in ("", "nan", "None") else ""
+                                    preview_rows.append({
+                                        "Brand SKU Type":         m_entry.get("menu_sku_type", ""),
+                                        "Menu Item":              m_entry["item"],
+                                        "Menu Price":             fmt_price(menu_p),
+                                        "Menu Markup Price":      fmt_price(menu_mk),
+                                        "Effective Current Price": fmt_price(eff),
+                                        "Ref Base Price":         ref_b_v,
+                                        "Ref Revised Price":      ref_r_v,
+                                    })
+                                except Exception:
+                                    pass
+                            if preview_rows:
+                                with st.expander("Sample rows — choose strategy based on these", expanded=True):
+                                    st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
+
+                        strategy_options = [
+                            "Higher of Menu Markup Price vs Ref Base Price",
+                            "Lower of Menu Markup Price vs Ref Base Price",
+                            "Use Ref Base Price only",
+                            "Use Menu Markup Price only (ignore Ref Base Price)",
+                        ]
+                        strategy_choice = st.radio(
+                            "Markup Price strategy:", strategy_options,
+                            key="base_strategy_radio")
+
+                        strategy_map = {
+                            strategy_options[0]: "higher",
+                            strategy_options[1]: "lower",
+                            strategy_options[2]: "ref",
+                            strategy_options[3]: "menu",
+                        }
+
+                        if st.button("Confirm Strategy", key="confirm_strategy_btn", type="primary"):
+                            st.session_state.slash_base_strategy = strategy_map[strategy_choice]
+                            st.session_state.strategy_confirmed  = True
+                            st.rerun()
+
+                apply_ready = (
+                    mode != "slash" or
+                    not (slashed_confirmed if mode == "slash" else False) and not ref_has_base or
+                    st.session_state.strategy_confirmed
+                ) if mode == "slash" else True
+
+                if mode == "slash":
+                    apply_ready = (
+                        not (slashed_confirmed or ref_has_base) or
+                        st.session_state.strategy_confirmed
+                    )
+
+                if not st.session_state.ref_apply_done and apply_ready:
+                    if st.button("Apply All Confirmed Matches", key="apply_confirmed_btn", type="primary"):
+                        df_apply          = load_df()
+                        working_idx_list2 = df_apply.iloc[freeze_idx:].index.tolist()
+                        confirmed_mapped  = []
+                        for m_entry in st.session_state.confirmed_matches:
+                            try:
+                                actual_idx = working_idx_list2[m_entry["menu_index"]]
+                                confirmed_mapped.append({**m_entry, "menu_index": actual_idx})
                             except IndexError:
                                 continue
 
                         addon_idx_mapped = {}
                         for orig_idx, addon_list in st.session_state.addon_indices.items():
-                            try:
-                                actual_orig = working_index_list[orig_idx]
-                                addon_idx_mapped[actual_orig] = addon_list
-                            except IndexError:
-                                continue
+                            addon_idx_mapped[orig_idx] = addon_list
 
                         updated_df, audit_df, detail_df = process_matches(
                             df_apply, ref_df, confirmed_mapped,
-                            mode=mode, addon_indices=addon_idx_mapped
+                            mode=mode,
+                            addon_indices=addon_idx_mapped,
+                            slash_base_strategy=st.session_state.get("slash_base_strategy"),
                         )
                         save_df(updated_df)
-                        st.session_state.audit_log = audit_df
-                        store_preview("post-ref-update", load_df().iloc[freeze_idx:])
-                        st.session_state.ref_apply_done = True
+                        st.session_state.audit_log       = audit_df
+                        st.session_state.ref_apply_done  = True
                         st.session_state.ref_apply_count = len(confirmed_mapped)
+                        store_preview("post-ref-update", load_df().iloc[freeze_idx:])
                         st.rerun()
 
                 if st.session_state.ref_apply_done:
@@ -752,26 +896,19 @@ elif operation == "Use reference CSV":
 
                     audit = st.session_state.audit_log
                     if audit is not None and not audit.empty:
-                        n_increased = 0
-                        if "⚠ Price Increased" in audit.columns:
-                            n_increased = (audit["⚠ Price Increased"] == "YES — REVIEW").sum()
-
+                        n_increased = int((audit.get("⚠ Price Increased", pd.Series(dtype=str)) == "YES — REVIEW").sum())
                         if n_increased > 0:
                             st.error(
-                                f"⚠ {n_increased} row(s) ended up with a HIGHER price than before "
-                                f"this update. Review the flagged rows below."
+                                f"⚠ {n_increased} row(s) have a HIGHER selling price than before. "
+                                f"Flagged rows shown below."
                             )
-
                         st.markdown("#### Match Summary")
                         summary_display = audit.copy()
-
                         if n_increased > 0 and "⚠ Price Increased" in summary_display.columns:
                             def _hl_summary(row):
                                 flagged = row.get("⚠ Price Increased", "") == "YES — REVIEW"
-                                return [
-                                    "background-color: #ffcccc; font-weight: bold;" if flagged else ""
-                                    for _ in row
-                                ]
+                                colour  = "background-color: #fff3cd; color: #856404;" if flagged else ""
+                                return [colour] * len(row)
                             st.dataframe(summary_display.style.apply(_hl_summary, axis=1), use_container_width=True)
                         else:
                             st.dataframe(summary_display, use_container_width=True)
@@ -780,7 +917,7 @@ elif operation == "Use reference CSV":
 
 
 elif operation == "Remove existing slashing only":
-    df_r = load_df()
+    df_r      = load_df()
     slashed_r = [
         i for i in df_r.index[freeze_idx:]
         if pd.notna(df_r.at[i, "Price"]) and pd.notna(df_r.at[i, "Markup Price"])
@@ -791,15 +928,16 @@ elif operation == "Remove existing slashing only":
         if not slashed_r:
             st.info("No slashing detected.")
         else:
-            sp, sm = df_r.at[slashed_r[0], "Price"], df_r.at[slashed_r[0], "Markup Price"]
+            sp  = df_r.at[slashed_r[0], "Price"]
+            sm  = df_r.at[slashed_r[0], "Markup Price"]
             pct = round((1 - sp / sm) * 100, 2)
             st.warning(f"Slashing active on {len(slashed_r)} rows (~{pct}% off).")
             if st.button("Remove All Slashing", key="remove_slash_only_btn", type="primary"):
                 update_col_r = find_update_col(df_r)
                 for i in slashed_r:
-                    df_r.at[i, "Price"] = df_r.at[i, "Markup Price"]
+                    df_r.at[i, "Price"]        = df_r.at[i, "Markup Price"]
                     df_r.at[i, "Markup Price"] = np.nan
-                    df_r.at[i, update_col_r] = "Yes"
+                    df_r.at[i, update_col_r]   = "Yes"
                 save_df(df_r)
                 st.session_state.remove_slash_only_done = True
                 store_preview("post-removal", load_df().iloc[freeze_idx:])
@@ -810,48 +948,66 @@ elif operation == "Remove existing slashing only":
         render_preview("post-removal")
 
 
-st.markdown(" ")
 section("④ Start & Revert Date / Time (Optional)")
 
 use_start  = st.toggle("Set a Start Date & Time",  value=False, key="use_start_toggle")
 use_revert = st.toggle("Set a Revert Date & Time", value=False, key="use_revert_toggle")
 
 if use_start or use_revert:
-    dt1, dt2 = st.columns(2)
+    dt1, dt2   = st.columns(2)
     s_date = s_time = r_date = r_time = ""
+    s_time_valid = r_time_valid = True
+
     if use_start:
         with dt1:
             st.markdown("**Start**")
-            sd   = st.date_input("Start Date", key="start_date_input")
-            st_t = st.time_input("Start Time (HH:MM)", key="start_time_input", step=1)
-            s_sec = st.number_input("Seconds", min_value=0, max_value=59, value=0, step=1, key="start_sec_input")
-            s_date = sd.strftime("%Y-%m-%d")
-            s_time = f"{st_t.strftime('%H:%M')}:{int(s_sec):02d}"
+            sd          = st.date_input("Start Date", key="start_date_input")
+            s_date      = sd.strftime("%Y-%m-%d")
+            s_time_raw  = st.text_input(
+                "Start Time (HH:MM:SS)", value="00:00:00",
+                key="start_time_input", placeholder="e.g. 14:30:45"
+            )
+            parsed = _parse_hms(s_time_raw)
+            if parsed is None:
+                s_time_valid = False
+                st.warning("Format must be HH:MM:SS — e.g. 14:30:45")
+            else:
+                s_time = parsed
+
     if use_revert:
         with dt2:
             st.markdown("**Revert**")
-            rd = st.date_input("Revert Date", key="revert_date_input")
-            rt = st.time_input("Revert Time (HH:MM)", key="revert_time_input", step=1)
-            r_sec = st.number_input("Seconds", min_value=0, max_value=59, value=0, step=1, key="revert_sec_input")
-            r_date = rd.strftime("%Y-%m-%d")
-            r_time = f"{rt.strftime('%H:%M')}:{int(r_sec):02d}"
+            rd          = st.date_input("Revert Date", key="revert_date_input")
+            r_date      = rd.strftime("%Y-%m-%d")
+            r_time_raw  = st.text_input(
+                "Revert Time (HH:MM:SS)", value="00:00:00",
+                key="revert_time_input", placeholder="e.g. 23:59:59"
+            )
+            parsed = _parse_hms(r_time_raw)
+            if parsed is None:
+                r_time_valid = False
+                st.warning("Format must be HH:MM:SS — e.g. 23:59:59")
+            else:
+                r_time = parsed
 
-    if st.button("Apply Dates to Updated Rows", key="apply_dates_btn", type="primary"):
-        df_dated    = load_df()
+    dates_ready = (not use_start or s_time_valid) and (not use_revert or r_time_valid)
+
+    if st.button("Apply Dates to Updated Rows", key="apply_dates_btn", type="primary",
+                 disabled=not dates_ready):
+        df_dated     = load_df()
         update_col_d = find_update_col(df_dated)
-        count = 0
+        count        = 0
         for i in df_dated.index[freeze_idx:]:
             if str(df_dated.at[i, update_col_d]).strip() == "Yes":
                 if use_start:
-                    if "Start Date"  in df_dated.columns: df_dated.at[i, "Start Date"]  = s_date
-                    if "Start Time"  in df_dated.columns: df_dated.at[i, "Start Time"]  = s_time
+                    if "Start Date" in df_dated.columns: df_dated.at[i, "Start Date"] = s_date
+                    if "Start Time" in df_dated.columns: df_dated.at[i, "Start Time"] = s_time
                 if use_revert:
                     if "Revert Date" in df_dated.columns: df_dated.at[i, "Revert Date"] = r_date
                     if "Revert Time" in df_dated.columns: df_dated.at[i, "Revert Time"] = r_time
                 count += 1
         save_df(df_dated)
         st.success(f"Dates applied to {count} rows.")
-
 
 st.markdown(" ")
 section("⑤ Download Output")
@@ -869,7 +1025,8 @@ col_d1, col_d2 = st.columns(2)
 col_d1.download_button(
     "⬇ Download Updated Menu CSV",
     data=final_df.to_csv(index=False).encode("utf-8"),
-    file_name=f"{name}_processed_{ts}.csv", mime="text/csv",
+    file_name=f"{name}_processed_{ts}.csv",
+    mime="text/csv",
 )
 
 audit = st.session_state.audit_log
@@ -877,5 +1034,6 @@ if audit is not None and not audit.empty:
     col_d2.download_button(
         "⬇ Download Matching Summary",
         data=audit.to_csv(index=False).encode("utf-8"),
-        file_name=f"{name}_summary_{ts}.csv", mime="text/csv",
+        file_name=f"{name}_summary_{ts}.csv",
+        mime="text/csv",
     )
