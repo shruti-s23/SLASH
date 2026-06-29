@@ -9,10 +9,32 @@ from datetime import datetime
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-from decision_engine import (
-    match_items, process_matches, find_addon_rows, strip_ids,
-    detect_existing_slashing_on_rows, effective_current_price,
-)
+from decision_engine import match_items, process_matches, find_addon_rows, strip_ids
+
+
+def effective_current_price(price, markup_price):
+    def _f(v):
+        try:
+            f = float(str(v).strip())
+            return f if not (f != f) else None
+        except Exception:
+            return None
+    vals = [x for x in (_f(price), _f(markup_price)) if x is not None]
+    return max(vals) if vals else None
+
+
+def detect_existing_slashing_on_rows(df, menu_indices):
+    slashed = []
+    for idx in menu_indices:
+        try:
+            p  = float(str(df.at[idx, "Price"]).strip())
+            mk = float(str(df.at[idx, "Markup Price"]).strip())
+            if p == p and mk == mk and mk > p:
+                slashed.append(idx)
+        except Exception:
+            pass
+    return slashed
+
 
 st.set_page_config(page_title="Price Revision", layout="wide")
 
