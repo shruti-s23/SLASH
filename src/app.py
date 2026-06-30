@@ -786,6 +786,9 @@ elif operation == "Use reference CSV":
                             for menu_idx, (_, addon_list) in items_with_addons.items()
                         } if apply_to_addons.startswith("Yes") else {}
 
+                slashed_confirmed = []
+                ref_has_base = False
+
                 if mode == "slash" and not st.session_state.ref_apply_done:
                     df_check          = load_df()
                     working_idx_list  = df_check.iloc[freeze_idx:].index.tolist()
@@ -800,7 +803,6 @@ elif operation == "Use reference CSV":
 
                     ref_base_col_check = next(
                         (c for c in ref_df.columns if "base" in c.lower() and "price" in c.lower()), None)
-                    ref_has_base = False
                     if ref_base_col_check:
                         for m_entry in st.session_state.confirmed_matches:
                             try:
@@ -818,37 +820,36 @@ elif operation == "Use reference CSV":
                             "Base Price values. Choose how to determine the final Markup Price."
                         )
 
-                        if slashed_confirmed or ref_has_base:
-                            preview_rows = []
-                            ref_price_col_s = next((c for c in ref_df.columns if "revised" in c.lower()), None)
-                            for m_entry in st.session_state.confirmed_matches[:10]:
-                                try:
-                                    actual_idx = working_idx_list[m_entry["menu_index"]]
-                                    menu_p  = to_float(df_check.at[actual_idx, "Price"])
-                                    menu_mk = to_float(df_check.at[actual_idx, "Markup Price"])
-                                    eff     = effective_current_price(menu_p, menu_mk)
-                                    ref_b_v = ""
-                                    ref_r_v = ""
-                                    if ref_base_col_check:
-                                        rb = str(ref_df.iloc[m_entry["ref_index"]][ref_base_col_check]).strip()
-                                        ref_b_v = rb if rb not in ("", "nan", "None") else ""
-                                    if ref_price_col_s:
-                                        rr = str(ref_df.iloc[m_entry["ref_index"]][ref_price_col_s]).strip()
-                                        ref_r_v = rr if rr not in ("", "nan", "None") else ""
-                                    preview_rows.append({
-                                        "Brand SKU Type":         m_entry.get("menu_sku_type", ""),
-                                        "Menu Item":              m_entry["item"],
-                                        "Menu Price":             fmt_price(menu_p),
-                                        "Menu Markup Price":      fmt_price(menu_mk),
-                                        "Effective Current Price": fmt_price(eff),
-                                        "Ref Base Price":         ref_b_v,
-                                        "Ref Revised Price":      ref_r_v,
-                                    })
-                                except Exception:
-                                    pass
-                            if preview_rows:
-                                with st.expander("Sample rows — choose strategy based on these", expanded=True):
-                                    st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
+                        preview_rows = []
+                        ref_price_col_s = next((c for c in ref_df.columns if "revised" in c.lower()), None)
+                        for m_entry in st.session_state.confirmed_matches[:10]:
+                            try:
+                                actual_idx = working_idx_list[m_entry["menu_index"]]
+                                menu_p  = to_float(df_check.at[actual_idx, "Price"])
+                                menu_mk = to_float(df_check.at[actual_idx, "Markup Price"])
+                                eff     = effective_current_price(menu_p, menu_mk)
+                                ref_b_v = ""
+                                ref_r_v = ""
+                                if ref_base_col_check:
+                                    rb = str(ref_df.iloc[m_entry["ref_index"]][ref_base_col_check]).strip()
+                                    ref_b_v = rb if rb not in ("", "nan", "None") else ""
+                                if ref_price_col_s:
+                                    rr = str(ref_df.iloc[m_entry["ref_index"]][ref_price_col_s]).strip()
+                                    ref_r_v = rr if rr not in ("", "nan", "None") else ""
+                                preview_rows.append({
+                                    "Brand SKU Type":          m_entry.get("menu_sku_type", ""),
+                                    "Menu Item":               m_entry["item"],
+                                    "Menu Price":              fmt_price(menu_p),
+                                    "Menu Markup Price":       fmt_price(menu_mk),
+                                    "Effective Current Price": fmt_price(eff),
+                                    "Ref Base Price":          ref_b_v,
+                                    "Ref Revised Price":       ref_r_v,
+                                })
+                            except Exception:
+                                pass
+                        if preview_rows:
+                            with st.expander("Sample rows — choose strategy based on these", expanded=True):
+                                st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
 
                         strategy_options = [
                             "Higher of Menu Markup Price vs Ref Base Price",
@@ -872,17 +873,13 @@ elif operation == "Use reference CSV":
                             st.session_state.strategy_confirmed  = True
                             st.rerun()
 
-                apply_ready = (
-                    mode != "slash" or
-                    not (slashed_confirmed if mode == "slash" else False) and not ref_has_base or
-                    st.session_state.strategy_confirmed
-                ) if mode == "slash" else True
-
                 if mode == "slash":
                     apply_ready = (
                         not (slashed_confirmed or ref_has_base) or
                         st.session_state.strategy_confirmed
                     )
+                else:
+                    apply_ready = True
 
                 if not st.session_state.ref_apply_done and apply_ready:
                     if st.button("Apply All Confirmed Matches", key="apply_confirmed_btn", type="primary"):
